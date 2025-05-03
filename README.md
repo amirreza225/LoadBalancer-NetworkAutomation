@@ -58,7 +58,7 @@ loadbalancer/
 - Web browser (for frontend)
 - `iperf` (optional for traffic testing)
 
-Preferably use mininet virtual machine for a more stable environment.
+**Preferably use Mininet virtual machine for a more stable environment.**
 
 Alternatively:
 Install Ryu and Mininet:
