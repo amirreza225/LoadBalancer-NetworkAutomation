@@ -91,6 +91,7 @@ ryu-manager lb_stp_ma_rest.py
 cd web/
 sudo python3 -m http.server 8000
 ```
+then open your browser and go to http://localhost:8000
 
 4. **Generate Traffic (Optional)**
 
