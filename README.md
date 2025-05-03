@@ -76,18 +76,21 @@ pip install ryu
 1. **Start Mininet Topology**
 
 ```bash
-sudo python3 topology/hexring_topo.py
+sudo python3 hexring_topo.py
 ```
 
 2. **Run the Ryu Controller**
 
 ```bash
-ryu-manager controller/lb_stp_ma_rest.py
+ryu-manager lb_stp_ma_rest.py
 ```
 
 3. **Launch Web UI**
 
-Simply open `web/index.html` in your browser (Chrome/Firefox).
+```bash
+cd web/
+sudo python3 -m http.server 8000
+```
 
 4. **Generate Traffic (Optional)**
 
