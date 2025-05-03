@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SDN Load Balancer Dashboards</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1"></script>
+  <script src="https://cdn.jsdelivr.net/npm/luxon@2.5.0/build/global/luxon.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.1.0"></script>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="app.js" defer></script>
+  <script src="topology.js" defer></script>
+  <link rel="stylesheet" href="./bootstrap-grid.css">
+  <style>
+    body { font-family: sans-serif; margin: 0;}
+    canvas { max-width: 1000px; margin-bottom: 20px; }
+    svg { border: 1px solid #ccc; background: #f9f9f9; display: block; margin: auto; }
+    .link { stroke-width: 4px; }
+    .node text { pointer-events: none; font-size: 12px; }
+    .node circle { stroke: #333; stroke-width: 1.5px; }
+    #legend { margin-top: 10px; text-align: center; }
+    #legend span { display: inline-block; width: 12px; height: 12px; margin-right: 4px; }
+    h1 {
+    background-color: #235b8b;
+    border-radius: 5px;
+    padding: 15px;
+    color: #fff;
+}
+h3 {
+    border-bottom: 1px solid;
+    padding-bottom: 5px;
+    color: #0d385c;
+}
+    #controls{
+      text-align: center;
+    }
+    button#toggle {
+    margin: 0 20px;
+    padding: 5px 15px;
+    background-color: #ff7f00;
+    border: 0;
+    border-radius: 5px;
+    color: #fff;
+    vertical-align: middle;
+    cursor: pointer;
+}
+button#toggle:hover{
+  background-color: #bd5e00;
+}
+button#toggle.resume{
+  background-color: rgb(32, 133, 32);
+}
+button#toggle.resume:hover{
+  background-color: rgb(22, 94, 22);
+}
+#hotLinks,#path{
+  list-style: none;
+  padding: 0;
+}
+#path{
+  list-style: none;
+  padding: 0;
+  font-size: small;
+}
+#controls {
+    position: absolute;
+    text-align: center;
+    padding: 5px;
+    border: 1px solid #aaa;
+    border-radius: 10px;
+    background: #fff;
+    color: #000;
+    display: inline-block;
+    right: 15px;
+    top: 50%;
+    transform: translateY(-50%);
+}
+.header{
+  position: relative;
+}
+footer{
+  text-align: center;
+  padding: 10px;
+  background-color: #235b8b;
+  color: white;
+  display: block;
+  width: 100%;
+  margin-top: 15px;
+}
+  </style>
+</head>
+<body>
+    <div class="container">
+      <div class="header">
+      <h1>SDN Load Balancer Dashboard</h1><div id="controls">
+        <button id="toggle">Pause</button>
+        <label>Threshold <input type="range" id="thSlider" min="100000" max="10000000" step="50000">
+          <span id="thVal"></span> B/s</label>
+      </div></div>
+    <div class="row">
+      <div class="col-lg-3 currentpaths"><h3>Current Paths:</h3><ul id="path"></ul></div>
+      <canvas class="col-lg-9" id="loadChart" width="1000" height="380"></canvas>
+    </div>
+    <div class="row">
+      <div class="col-lg-3" id="congestion">
+        <h3>Congested Links</h3>
+        <ul id="hotLinks"></ul>
+      </div>
+    <div class="col-lg-9">
+      <h3>Live Topology</h3>
+      <svg width="550" height="500"></svg>
+      <div id="legend">
+        <strong>Link Load Colors:</strong>
+        <span style="background:green"></span> Low &nbsp;
+        <span style="background:orange"></span> Medium &nbsp;
+        <span style="background:red"></span> High
+      </div></div>
+    </div>
+    <footer>
+      <p>SDN Load Balancer &copy; 2025</p>
+      <p>Created by Amirreza Alibeigi - Reza Ghadiri Abkenari</p>
+    </footer>
+    </div>
+</body>
+</html>
