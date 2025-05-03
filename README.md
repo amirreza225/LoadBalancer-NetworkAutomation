@@ -27,12 +27,8 @@ This project implements a dynamic load balancer in a Software Defined Network (S
 
 ```
 loadbalancer/
-├── controller/
-│   └── lb_stp_ma_rest.py        # Main Ryu app with STP, MA, REST logic
-├── topology/
-│   └── hexring_topo.py          # Mininet topology (6-switch hex ring)
-├── utils/
-│   └── portmap.py               # Static port adjacency map
+├── lb_stp_ma_rest.py        # Main Ryu app with STP, MA, REST logic
+├── hexring_topo.py          # Mininet topology (6-switch hex ring)
 ├── web/
 │   ├── index.html               # D3.js topology + Chart.js frontend
 │   ├── topology.js              # D3-based graph visualizer
