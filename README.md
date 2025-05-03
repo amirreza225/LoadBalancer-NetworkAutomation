@@ -29,6 +29,7 @@ This project implements a dynamic load balancer in a Software Defined Network (S
 loadbalancer/
 ├── lb_stp_ma_rest.py        # Main Ryu app with STP, MA, REST logic
 ├── hexring_topo.py          # Mininet topology (6-switch hex ring)
+├── commands.txt             # Necessary commands for running and testing the projects
 ├── web/
 │   ├── index.html               # D3.js topology + Chart.js frontend
 │   ├── topology.js              # D3-based graph visualizer
@@ -58,10 +59,10 @@ loadbalancer/
 - Web browser (for frontend)
 - `iperf` (optional for traffic testing)
 
-**Preferably use Mininet virtual machine for a more stable environment.**
+**Preferably use Mininet virtual machine for a more stable environment and assure your 8000, 8080, 22 ports are forwared to the host machine**
 
 Alternatively:
-Install Ryu and Mininet:
+Install Ryu and Mininet (you might need to install some dependencies):
 
 ```bash
 sudo apt install mininet
@@ -91,8 +92,8 @@ Simply open `web/index.html` in your browser (Chrome/Firefox).
 4. **Generate Traffic (Optional)**
 
 ```bash
-mininet> h1 iperf -s &
-mininet> h6 iperf -c h1
+mininet> h2 iperf -s &
+mininet> h1 iperf -c 192.168.8.41 -u -b 1000M  -t 15
 ```
 
 ---

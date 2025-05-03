@@ -22,4 +22,4 @@ h1 iperf -c 192.168.8.45 -u -p 5002 -b 100M -t 90
 
 -between h1-2 for 2 minutes-
 h2 iperf -s &
-h1 iperf -c 192.168.8.42 -u -b 1000M  -t 15
+h1 iperf -c 192.168.8.41 -u -b 1000M  -t 15
