@@ -32,15 +32,61 @@ function initTopology() {
 
   // Start fetching topology data
   updateTopology();
-  setInterval(updateTopology, 5000); // Update topology every 5 seconds
+  setInterval(checkTopologyChanges, 5000); // Check for topology changes every 5 seconds
   setInterval(updateLinkColors, 1000); // Update link colors every second
 }
 
-// Fetch and update topology from API
-async function updateTopology() {
+// Check for topology changes and only update if needed
+async function checkTopologyChanges() {
   try {
     const response = await fetch(`${API}/topology`);
-    const topologyData = await response.json();
+    const newTopologyData = await response.json();
+    
+    if (newTopologyData.nodes && newTopologyData.links) {
+      // Check if topology has actually changed
+      if (hasTopologyChanged(newTopologyData)) {
+        console.log("Topology changed, updating visualization...");
+        updateTopology(newTopologyData);
+      }
+    }
+  } catch (error) {
+    console.error("Error checking topology changes:", error);
+  }
+}
+
+// Check if topology has changed compared to current state
+function hasTopologyChanged(newTopology) {
+  // Compare number of nodes and links
+  if (nodes.length !== newTopology.nodes.length || links.length !== newTopology.links.length) {
+    return true;
+  }
+  
+  // Compare node IDs
+  const currentNodeIds = new Set(nodes.map(n => n.id));
+  const newNodeIds = new Set(newTopology.nodes.map(n => n.id));
+  if (currentNodeIds.size !== newNodeIds.size || 
+      [...currentNodeIds].some(id => !newNodeIds.has(id))) {
+    return true;
+  }
+  
+  // Compare link connections
+  const currentLinkIds = new Set(links.map(l => `${l.source.id || l.source}-${l.target.id || l.target}`));
+  const newLinkIds = new Set(newTopology.links.map(l => `${l.source}-${l.target}`));
+  if (currentLinkIds.size !== newLinkIds.size || 
+      [...currentLinkIds].some(id => !newLinkIds.has(id))) {
+    return true;
+  }
+  
+  return false;
+}
+
+// Fetch and update topology from API (only called when topology changes)
+async function updateTopology(topologyData = null) {
+  try {
+    if (!topologyData) {
+      const response = await fetch(`${API}/topology`);
+      topologyData = await response.json();
+    }
     
     if (topologyData.nodes && topologyData.links) {
       // Update nodes and links
