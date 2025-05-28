@@ -13,24 +13,30 @@ This project implements an intelligent, adaptive load balancer in a Software Def
 - **Goal**: Minimize congestion, predict network bottlenecks, and optimize flow paths using advanced algorithms
 
 ---
+
 ## UI Screenshot
-![Alt text](UI.png?raw=true "Title")
+
+![SDN Load Balancer](UI.png)
+
 ---
 
 ## 🔧 Enhanced Architecture
 
 ### **Intelligent Controller**
+
 - **Dynamic Topology Discovery**: Automatically detects and adapts to any network topology
 - **Multi-Path Routing**: Implements Yen's K-shortest paths algorithm for path diversity
 - **Predictive Analytics**: Uses linear regression to forecast congestion trends
 - **Adaptive Load Balancing**: Multiple routing strategies (Adaptive, Least-Loaded, ECMP, Round-Robin)
 
 ### **Flexible Topology Support**
+
 - **Original Hexring**: 6-switch hexagonal ring with chordal shortcuts
 - **Generic Topologies**: Linear, ring, tree, mesh, or custom configurations
 - **Auto-Discovery**: Hosts and switches discovered dynamically without configuration
 
 ### **Advanced Web Interface**
+
 - **Real-time Efficiency Metrics**: Comparative analysis vs traditional shortest-path routing
 - **Dynamic Topology Visualization**: Adapts to any network structure with D3.js
 - **Performance Analytics**: Comprehensive dashboard with efficiency scoring
@@ -60,24 +66,28 @@ LoadBalancer-NetworkAutomation/
 ## ✅ Advanced Features
 
 ### **🧠 Intelligent Load Balancing**
+
 - 🔮 **Predictive Congestion Avoidance** - Forecasts network bottlenecks using trend analysis
 - 🛣️ **Multi-Path Routing** - Maintains up to 3 alternative paths per flow
 - ⚡ **Adaptive Path Selection** - Dynamically chooses optimal routes based on real-time conditions
 - 🎯 **Load Balancing Modes**: Adaptive, Least-Loaded, Weighted ECMP, Round-Robin
 
 ### **📊 Advanced Analytics**
+
 - 📈 **Efficiency Scoring** - Quantifies improvement over traditional routing (0-100%)
 - 📉 **Variance Analysis** - Measures traffic distribution improvement
 - 🔄 **Congestion Avoidance Rate** - Tracks successful bottleneck prevention
 - ⏱️ **Real-time Metrics** - Live comparison with shortest-path baseline
 
 ### **🌐 Universal Topology Support**
+
 - 🔄 **Dynamic Discovery** - Works with any OpenFlow topology without configuration
 - 🏗️ **Topology Generator** - Built-in support for linear, ring, tree, mesh topologies
 - 🔗 **Auto-Host Detection** - Intelligent host discovery and naming
 - 📡 **Live Topology Updates** - Real-time adaptation to network changes
 
 ### **🎨 Enhanced Visualization**
+
 - 📊 **Efficiency Dashboard** - Comprehensive performance metrics and comparisons
 - 🗺️ **Dynamic Topology Map** - Adapts visualization to any network structure
 - 🚦 **Color-coded Links** - Visual traffic load indicators (green/orange/red)
@@ -96,6 +106,7 @@ LoadBalancer-NetworkAutomation/
 **Recommended**: Use Mininet VM with port forwarding (8000, 8080, 22)
 
 ### Installation
+
 ```bash
 # Install dependencies
 sudo apt install mininet
@@ -111,6 +122,7 @@ cd LoadBalancer-NetworkAutomation
 ## 🚀 Running the Project
 
 ### **Option 1: Original Hexring Topology**
+
 ```bash
 # Terminal 1: Start hexring topology
 sudo python3 hexring_topo.py
@@ -124,6 +136,7 @@ sudo python3 -m http.server 8000
 ```
 
 ### **Option 2: Generic Topologies**
+
 ```bash
 # Terminal 1: Choose your topology
 sudo python3 generic_topo.py --topology linear --switches 4
@@ -135,6 +148,7 @@ sudo python3 generic_topo.py --topology mesh --switches 4
 ```
 
 ### **Testing Traffic**
+
 ```bash
 # Test connectivity
 mininet> pingall
@@ -154,17 +168,18 @@ Access dashboard: **http://localhost:8000**
 
 ## 🌐 Enhanced REST API
 
-| Endpoint | Description |
-|----------|-------------|
-| `/topology` | Dynamic network topology (nodes & links) |
-| `/load/links` | Real-time link utilization data |
-| `/load/path` | Active flow paths with host names |
-| `/stats/efficiency` | Comprehensive efficiency metrics |
-| `/stats/algorithm` | Current algorithm mode and statistics |
-| `/config/threshold` | Congestion threshold configuration |
-| `/load/ports/{dpid}/{port}` | Historical port statistics |
+| Endpoint                    | Description                              |
+| --------------------------- | ---------------------------------------- |
+| `/topology`                 | Dynamic network topology (nodes & links) |
+| `/load/links`               | Real-time link utilization data          |
+| `/load/path`                | Active flow paths with host names        |
+| `/stats/efficiency`         | Comprehensive efficiency metrics         |
+| `/stats/algorithm`          | Current algorithm mode and statistics    |
+| `/config/threshold`         | Congestion threshold configuration       |
+| `/load/ports/{dpid}/{port}` | Historical port statistics               |
 
 ### **Example API Usage**
+
 ```bash
 # Get efficiency metrics
 curl http://localhost:8080/stats/efficiency
@@ -181,6 +196,7 @@ curl http://localhost:8080/topology
 ## 📈 Advanced Visualization Features
 
 ### **Efficiency Dashboard**
+
 - **Composite Efficiency Score**: Weighted combination of load balancing effectiveness
 - **Load Balancing Rate**: Percentage of flows using alternative paths
 - **Congestion Avoidance**: Success rate in preventing bottlenecks
@@ -188,12 +204,14 @@ curl http://localhost:8080/topology
 - **Path Overhead**: Trade-off analysis between efficiency and path length
 
 ### **Dynamic Topology Visualization**
+
 - **Auto-adapting Layout**: Works with any network topology
 - **Real-time Updates**: Only reloads when topology actually changes
 - **Traffic-based Coloring**: Links colored by current utilization
 - **Host Discovery**: Shows only actual discovered hosts
 
 ### **Algorithm Transparency**
+
 - **Current Mode**: Active load balancing strategy
 - **Alternative Paths**: Number of backup routes maintained
 - **Prediction Data**: Congestion trend analysis points
@@ -204,18 +222,21 @@ curl http://localhost:8080/topology
 ## 🔬 Technical Innovations
 
 ### **Predictive Congestion Avoidance**
+
 - **10-second trend windows** for each link
 - **Linear regression** to predict future utilization
 - **5-second lookahead** for proactive routing decisions
 - **30% prediction weight** in path selection scoring
 
 ### **Multi-Path Load Balancing**
+
 - **Yen's K-shortest paths** algorithm (up to 3 paths per flow)
 - **Adaptive scoring** combining current load + predicted congestion
 - **Dynamic path weights** for ECMP load distribution
 - **Fast failover** using pre-computed alternative paths
 
 ### **Efficiency Measurement**
+
 - **Baseline comparison** with traditional shortest-path routing
 - **Variance analysis** of link utilization distribution
 - **Composite scoring** system (0-100% efficiency)
@@ -248,6 +269,7 @@ Compared to traditional shortest-path routing, this load balancer provides:
 ## 📊 Validation & Testing
 
 The load balancer has been tested with:
+
 - **Multiple topology types** (linear, ring, tree, mesh, hexring)
 - **Varying network sizes** (3-10 switches)
 - **Different traffic patterns** (uniform, hotspot, burst)
@@ -277,7 +299,7 @@ GitHub: [@rghaf](https://github.com/rghaf)
 ## 🏆 Key Achievements
 
 - ✅ **Universal topology support** - works with any network structure
-- ✅ **Predictive congestion avoidance** - proactive bottleneck prevention  
+- ✅ **Predictive congestion avoidance** - proactive bottleneck prevention
 - ✅ **Multi-path load balancing** - intelligent traffic distribution
 - ✅ **Real-time efficiency analytics** - quantified performance improvement
 - ✅ **Dynamic visualization** - adaptive network monitoring dashboard
