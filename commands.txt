@@ -1,43 +1,295 @@
--run web server-
-sudo python3 -m http.server 8000
+# ================================================================
+# ADVANCED SDN LOAD BALANCER - COMPLETE COMMAND REFERENCE
+# ================================================================
 
--run controller-
+# ==================== SYSTEM SETUP ====================
+
+-install dependencies-
+sudo apt update
+sudo apt install mininet python3-pip curl
+pip3 install ryu
+
+-clone repository-
+git clone <repository-url>
+cd LoadBalancer-NetworkAutomation
+
+-check ports (ensure 8000, 8080, 6653 are available)-
+sudo netstat -tulpn | grep -E ':(8000|8080|6653)'
+
+# ==================== RUNNING THE SYSTEM ====================
+
+-start controller (Terminal 1)-
 ryu-manager --observe-links lb_stp_ma_rest.py
 
--run topologies-
-# Original hexring topology
+-start web server (Terminal 2)-
+cd web/
+sudo python3 -m http.server 8000
+
+-access web dashboard-
+# Open browser: http://localhost:8000
+
+# ==================== TOPOLOGY OPTIONS ====================
+
+-hexring topology (Terminal 3)-
 sudo python3 hexring_topo.py
 
-# Generic topologies (any size/structure)
+-linear topology-
 sudo python3 generic_topo.py --topology linear --switches 4
+sudo python3 generic_topo.py --topology linear --switches 6
+sudo python3 generic_topo.py --topology linear --switches 8
+
+-ring topology-
 sudo python3 generic_topo.py --topology ring --switches 5
+sudo python3 generic_topo.py --topology ring --switches 7
+
+-tree topology-
 sudo python3 generic_topo.py --topology tree --switches 7
+sudo python3 generic_topo.py --topology tree --switches 15
+
+-mesh topology-
 sudo python3 generic_topo.py --topology mesh --switches 4
+sudo python3 generic_topo.py --topology mesh --switches 5
+
+-hexring with chords-
 sudo python3 generic_topo.py --topology hexring --switches 6
 
--pingall-
+# ==================== BASIC TESTING ====================
+
+-test connectivity-
 pingall
 
--clear mininet-
+-check host IPs-
+net
+
+-check switch info-
+dpctl dump-flows
+
+-check links-
+links
+
+-exit mininet-
+exit
+
+-cleanup mininet-
 sudo mn -c
 
-----test commands----
-# For hexring topology (original IPs)
--between h5-h6 and h6-h1-
+# ==================== TRAFFIC GENERATION ====================
+
+# ===== HEXRING TOPOLOGY TRAFFIC (192.168.8.x) =====
+
+-simple traffic test hexring-
+h2 iperf -s &
+h1 iperf -c 192.168.8.41 -u -b 100M -t 30
+
+-high load test hexring-
+h2 iperf -s &
+h1 iperf -c 192.168.8.41 -u -b 1000M -t 60
+
+-multi-flow concurrent test hexring-
+h2 iperf -s -p 5001 &
+h3 iperf -s -p 5002 &
+h4 iperf -s -p 5003 &
+h1 iperf -c 192.168.8.41 -u -p 5001 -b 200M -t 120 &
+h5 iperf -c 192.168.8.42 -u -p 5002 -b 200M -t 120 &
+h6 iperf -c 192.168.8.43 -u -p 5003 -b 200M -t 120
+
+-congestion stress test hexring-
 h5 iperf -s -u -p 5001 &
 h6 iperf -s -u -p 5002 &
-h6 iperf -c 192.168.8.44 -u -p 5001 -b 100M -t 90 &
-h1 iperf -c 192.168.8.45 -u -p 5002 -b 100M -t 90 
+h6 iperf -c 192.168.8.44 -u -p 5001 -b 300M -t 180 &
+h1 iperf -c 192.168.8.45 -u -p 5002 -b 300M -t 180 &
+h2 iperf -c 192.168.8.44 -u -b 200M -t 180 &
+h3 iperf -c 192.168.8.45 -u -b 200M -t 180
 
--between h1-h2 hexring-
+# ===== GENERIC TOPOLOGY TRAFFIC (192.168.1.x) =====
+
+-simple traffic test generic-
 h2 iperf -s &
-h1 iperf -c 192.168.8.41 -u -b 1000M -t 15
+h1 iperf -c 192.168.1.12 -u -b 100M -t 30
 
-# For generic topologies (generic IPs)
--between h1-h2 generic-
+-high load test generic-
 h2 iperf -s &
-h1 iperf -c 192.168.1.12 -u -b 1000M -t 15
+h1 iperf -c 192.168.1.12 -u -b 1000M -t 60
 
--between h1-h3 generic-
-h3 iperf -s &
-h1 iperf -c 192.168.1.13 -u -b 500M -t 30
+-multi-flow test generic-
+h2 iperf -s -p 5001 &
+h3 iperf -s -p 5002 &
+h1 iperf -c 192.168.1.12 -u -p 5001 -b 200M -t 120 &
+h4 iperf -c 192.168.1.13 -u -p 5002 -b 200M -t 120
+
+-triangle traffic pattern generic (good for 4+ switch topologies)-
+h2 iperf -s -p 5001 &
+h3 iperf -s -p 5002 &
+h4 iperf -s -p 5003 &
+h1 iperf -c 192.168.1.12 -u -p 5001 -b 150M -t 180 &
+h2 iperf -c 192.168.1.13 -u -p 5002 -b 150M -t 180 &
+h3 iperf -c 192.168.1.14 -u -p 5003 -b 150M -t 180
+
+# ==================== ADVANCED TESTING ====================
+
+-burst traffic test-
+h2 iperf -s &
+# Send traffic in bursts to test adaptive routing
+h1 iperf -c 192.168.1.12 -u -b 100M -t 10
+sleep 5
+h1 iperf -c 192.168.1.12 -u -b 500M -t 10
+sleep 5
+h1 iperf -c 192.168.1.12 -u -b 1000M -t 10
+
+-load balancing efficiency test-
+# Start servers on all hosts
+h2 iperf -s -p 5001 &
+h3 iperf -s -p 5002 &
+h4 iperf -s -p 5003 &
+# Generate traffic to create different path loads
+h1 iperf -c 192.168.1.12 -u -p 5001 -b 200M -t 300 &
+sleep 30
+h1 iperf -c 192.168.1.13 -u -p 5002 -b 200M -t 270 &
+sleep 30
+h1 iperf -c 192.168.1.14 -u -p 5003 -b 200M -t 240
+
+-dynamic rebalancing test-
+# Start background traffic
+h2 iperf -s &
+h1 iperf -c 192.168.1.12 -u -b 100M -t 300 &
+# Add congestion after 60 seconds
+sleep 60
+h3 iperf -s -p 5001 &
+h4 iperf -c 192.168.1.13 -u -p 5001 -b 800M -t 180
+
+# ==================== MONITORING & DEBUGGING ====================
+
+-check controller logs-
+# In controller terminal, watch for path installation and rerouting messages
+
+-monitor real-time stats via REST API-
+curl http://localhost:8080/stats/efficiency
+curl http://localhost:8080/stats/algorithm
+curl http://localhost:8080/topology
+curl http://localhost:8080/load/links
+curl http://localhost:8080/load/path
+
+-check efficiency metrics-
+curl -s http://localhost:8080/stats/efficiency | python3 -m json.tool
+
+-monitor specific port-
+curl http://localhost:8080/load/ports/1/2
+
+-watch link utilization-
+watch -n 2 'curl -s http://localhost:8080/load/links | python3 -m json.tool'
+
+-check current threshold-
+curl http://localhost:8080/config/threshold
+
+-set new threshold-
+curl -X POST http://localhost:8080/config/threshold \
+  -H "Content-Type: application/json" \
+  -d '{"threshold": 2000000}'
+
+# ==================== TROUBLESHOOTING ====================
+
+-kill stuck processes-
+sudo pkill -f mininet
+sudo pkill -f ryu-manager
+sudo pkill -f "python3 -m http.server"
+
+-clean everything-
+sudo mn -c
+sudo service openvswitch-switch restart
+
+-check process status-
+ps aux | grep -E "(mininet|ryu|python3.*8000)"
+
+-check port usage-
+sudo lsof -i :8000
+sudo lsof -i :8080
+sudo lsof -i :6653
+
+-restart services if needed-
+sudo service openvswitch-switch restart
+sudo service networking restart
+
+# ==================== PERFORMANCE TESTING ====================
+
+-baseline shortest path comparison-
+# 1. Run traffic with load balancer
+h2 iperf -s &
+h1 iperf -c 192.168.1.12 -u -b 500M -t 60
+# 2. Check efficiency metrics in dashboard
+# 3. Compare variance improvement percentage
+
+-scalability test (for larger topologies)-
+# Generate traffic between all host pairs
+for i in {1..4}; do
+  for j in {1..4}; do
+    if [ $i -ne $j ]; then
+      h$j iperf -s -p 500$i &
+    fi
+  done
+done
+# Wait for servers to start
+sleep 5
+for i in {1..4}; do
+  for j in {1..4}; do
+    if [ $i -ne $j ]; then
+      h$i iperf -c 192.168.1.1$((j+1)) -u -p 500$i -b 50M -t 120 &
+    fi
+  done
+done
+
+-congestion prediction accuracy test-
+# Start predictable traffic pattern
+h2 iperf -s &
+# Gradually increase load to test prediction
+h1 iperf -c 192.168.1.12 -u -b 100M -t 30 &
+sleep 30
+h1 iperf -c 192.168.1.12 -u -b 300M -t 30 &
+sleep 30
+h1 iperf -c 192.168.1.12 -u -b 600M -t 30 &
+sleep 30
+h1 iperf -c 192.168.1.12 -u -b 1000M -t 30
+
+# ==================== DEMONSTRATION SCENARIOS ====================
+
+-demo scenario 1: basic load balancing-
+# Show path selection
+h2 iperf -s &
+h3 iperf -s -p 5001 &
+h1 iperf -c 192.168.1.12 -u -b 200M -t 60 &
+h1 iperf -c 192.168.1.13 -u -p 5001 -b 200M -t 60
+
+-demo scenario 2: congestion avoidance-
+# Create congestion on one path, show rerouting
+h2 iperf -s &
+h3 iperf -s -p 5001 &
+h4 iperf -s -p 5002 &
+# Start background traffic
+h1 iperf -c 192.168.1.12 -u -b 100M -t 180 &
+# Create congestion
+sleep 30
+h3 iperf -c 192.168.1.14 -u -p 5002 -b 800M -t 120
+
+-demo scenario 3: efficiency comparison-
+# Run identical traffic patterns and compare metrics
+# Before: Check baseline efficiency score
+# During: Monitor real-time improvements
+# After: Analyze variance reduction
+
+# ==================== USEFUL ALIASES ====================
+
+-create helpful aliases-
+alias start-controller='ryu-manager --observe-links lb_stp_ma_rest.py'
+alias start-web='cd web && sudo python3 -m http.server 8000'
+alias clean-mininet='sudo mn -c'
+alias check-efficiency='curl -s http://localhost:8080/stats/efficiency | python3 -m json.tool'
+alias check-algorithm='curl -s http://localhost:8080/stats/algorithm | python3 -m json.tool'
+
+# ==================== NOTES ====================
+
+# - Always start controller before topology
+# - Wait 10-15 seconds after starting topology before generating traffic
+# - Monitor dashboard for real-time efficiency metrics
+# - Use multiple terminals for concurrent testing
+# - Check controller logs for path installation messages
+# - Efficiency improvements are most visible under moderate to high loads
+# - Predictive features require several minutes of traffic to show benefits
