@@ -90,16 +90,16 @@ h2 iperf -s -p 5001 &
 h3 iperf -s -p 5002 &
 h4 iperf -s -p 5003 &
 h1 iperf -c 192.168.1.12 -u -p 5001 -b 200M -t 120 &
-h5 iperf -c 192.168.1.15 -u -p 5002 -b 200M -t 120 &
+h5 iperf -c 192.168.1.13 -u -p 5002 -b 200M -t 120 &
 h6 iperf -c 192.168.1.14 -u -p 5003 -b 200M -t 120
 
 -congestion stress test hexring-
 h5 iperf -s -u -p 5001 &
 h6 iperf -s -u -p 5002 &
-h6 iperf -c 192.168.8.14 -u -p 5001 -b 300M -t 180 &
-h1 iperf -c 192.168.8.15 -u -p 5002 -b 300M -t 180 &
-h2 iperf -c 192.168.8.14 -u -b 200M -t 180 &
-h3 iperf -c 192.168.8.15 -u -b 200M -t 180
+h6 iperf -c 192.168.1.15 -u -p 5001 -b 300M -t 180 &
+h1 iperf -c 192.168.1.16 -u -p 5002 -b 300M -t 180 &
+h2 iperf -c 192.168.1.15 -u -b 200M -t 180 &
+h3 iperf -c 192.168.1.16 -u -b 200M -t 180
 
 # ===== GENERIC TOPOLOGY TRAFFIC (192.168.1.x) =====
 
