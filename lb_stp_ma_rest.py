@@ -28,10 +28,10 @@ MA_WINDOW_SEC  = 5         # seconds
 DEFAULT_THRESH = 50_000_000 # bytes/sec
 CONGESTION_PREDICTION_WINDOW = 10  # seconds for trend analysis
 LOAD_BALANCING_MODES = {
-    'ROUND_ROBIN': 0,
-    'LEAST_LOADED': 1,
-    'WEIGHTED_ECMP': 2,
-    'ADAPTIVE': 3
+    'round_robin': 0,
+    'least_loaded': 1,
+    'weighted_ecmp': 2,
+    'adaptive': 3
 }
 
 class LoadBalancerREST(app_manager.RyuApp):
@@ -54,7 +54,7 @@ class LoadBalancerREST(app_manager.RyuApp):
         self.host_locations = {}  # dpid -> set of host MACs on this switch
         self.topology_ready = False
         # Enhanced load balancing
-        self.load_balancing_mode = LOAD_BALANCING_MODES['ADAPTIVE']
+        self.load_balancing_mode = LOAD_BALANCING_MODES['adaptive']
         self.flow_priorities = {}  # (src, dst) -> priority level
         self.congestion_trends = collections.defaultdict(list)  # (dpid, port) -> [(time, utilization)]
         self.alternative_paths = {}  # (src, dst) -> [path1, path2, ...]
