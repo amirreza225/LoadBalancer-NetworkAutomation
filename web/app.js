@@ -2,7 +2,7 @@
 const API = "http://localhost:8080";
 const POLL_INTERVAL = 1000;   // ms
 const MAX_POINTS = 20;        // data points per line
-window.threshold = 100;   // initial Mbps - make it global for topology.js
+window.threshold = 50;   // initial Mbps - make it global for topology.js
 let paused = false;
 
 // A fixed, distinguishable palette
