@@ -189,11 +189,11 @@ class LoadBalancerREST(app_manager.RyuApp):
         self.alternative_paths[flow_key] = all_paths
         
         # Select best path based on current mode
-        if self.load_balancing_mode == LOAD_BALANCING_MODES['ADAPTIVE']:
+        if self.load_balancing_mode == LOAD_BALANCING_MODES['adaptive']:
             return self._select_adaptive_path(all_paths, cost)
-        elif self.load_balancing_mode == LOAD_BALANCING_MODES['LEAST_LOADED']:
+        elif self.load_balancing_mode == LOAD_BALANCING_MODES['least_loaded']:
             return self._select_least_loaded_path(all_paths, cost)
-        elif self.load_balancing_mode == LOAD_BALANCING_MODES['WEIGHTED_ECMP']:
+        elif self.load_balancing_mode == LOAD_BALANCING_MODES['weighted_ecmp']:
             return self._select_weighted_path(all_paths, cost)
         else:  # ROUND_ROBIN
             return self._select_round_robin_path(all_paths, flow_key)
