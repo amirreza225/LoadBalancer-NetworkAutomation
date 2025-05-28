@@ -50,6 +50,18 @@ class LoadBalancerREST(app_manager.RyuApp):
         self.rate_hist    = collections.defaultdict(lambda: collections.defaultdict(list))
         self.last_calc    = 0
         self.THRESHOLD_BPS = DEFAULT_THRESH
+        # efficiency tracking
+        self.efficiency_metrics = {
+            'total_flows': 0,
+            'load_balanced_flows': 0,
+            'congestion_avoided': 0,
+            'avg_path_length_lb': 0,
+            'avg_path_length_sp': 0,
+            'total_reroutes': 0,
+            'link_utilization_variance': 0,
+            'baseline_link_utilization_variance': 0,
+            'start_time': time.time()
+        }
         # start topology discovery and stats polling
         hub.spawn(self._discover_topology)
         hub.spawn(self._poll_stats)
@@ -122,6 +134,18 @@ class LoadBalancerREST(app_manager.RyuApp):
                     src_name = self.hosts.get(eth.src, eth.src)
                     dst_name = self.hosts.get(eth.dst, eth.dst)
                     self.logger.info("Installed path %s→%s: %s", src_name, dst_name, path)
+                    
+                    # Update efficiency metrics
+                    self.efficiency_metrics['total_flows'] += 1
+                    baseline_path = self._shortest_path_baseline(s_dpid, d_dpid)
+                    if baseline_path and path != baseline_path:
+                        self.efficiency_metrics['load_balanced_flows'] += 1
+                        # Check if we avoided congestion on the baseline path
+                        if len(baseline_path) > 1:
+                            avoided_congestion = any(cost.get((baseline_path[i], baseline_path[i+1]), 0) > self.THRESHOLD_BPS 
+                                                   for i in range(len(baseline_path)-1))
+                            if avoided_congestion:
+                                self.efficiency_metrics['congestion_avoided'] += 1
             
             path = self.flow_paths.get(fid)
             if path:
@@ -209,6 +233,7 @@ class LoadBalancerREST(app_manager.RyuApp):
         if now - self.last_calc >= MA_WINDOW_SEC:
             self.last_calc = now
             self._rebalance(now)
+            self._calculate_efficiency_metrics(now)
 
     def _rebalance(self, now):
         """
@@ -228,6 +253,7 @@ class LoadBalancerREST(app_manager.RyuApp):
                 self.logger.info("Re-routing %s→%s: %s", src_name, dst_name, new_path)
                 self._install_path(new_path, src, dst)
                 self.flow_paths[fid] = new_path
+                self.efficiency_metrics['total_reroutes'] += 1
 
     def _avg_rate(self, dpid, port, now):
         """
@@ -424,6 +450,83 @@ class LoadBalancerREST(app_manager.RyuApp):
                 cost[(u, v)] = link_cost
                 cost[(v, u)] = link_cost
         return cost
+    
+    def _shortest_path_baseline(self, src, dst):
+        """
+        Calculate shortest path without considering congestion (baseline comparison).
+        """
+        # Use hop count as cost (traditional shortest path)
+        uniform_cost = {(u, v): 1 for (u, v) in self.links.keys()}
+        return self._dijkstra(src, dst, uniform_cost, avoid_congested=False)
+    
+    def _calculate_efficiency_metrics(self, now):
+        """
+        Calculate efficiency metrics comparing load balancing vs baseline routing.
+        """
+        if not self.topology_ready or not self.flow_paths:
+            return
+        
+        # Calculate current link utilization variance (lower is better)
+        link_utils = []
+        baseline_utils = collections.defaultdict(float)
+        
+        for (u, v), (pu, pv) in self.links.items():
+            if u < v:  # Avoid duplicates
+                rate_u = self._avg_rate(u, pu, now)
+                rate_v = self._avg_rate(v, pv, now)
+                current_util = max(rate_u, rate_v)
+                link_utils.append(current_util)
+        
+        # Calculate what utilization would be with shortest path routing
+        for (src, dst), path in self.flow_paths.items():
+            if src in self.mac_to_dpid and dst in self.mac_to_dpid:
+                s_dpid = self.mac_to_dpid[src]
+                d_dpid = self.mac_to_dpid[dst]
+                baseline_path = self._shortest_path_baseline(s_dpid, d_dpid)
+                
+                if baseline_path:
+                    # Estimate traffic for this flow (simplified)
+                    flow_traffic = 1000000  # 1 Mbps per flow estimate
+                    
+                    # Add traffic to baseline path
+                    for i in range(len(baseline_path) - 1):
+                        u, v = baseline_path[i], baseline_path[i + 1]
+                        key = f"{min(u,v)}-{max(u,v)}"
+                        baseline_utils[key] += flow_traffic
+        
+        # Calculate variances
+        if link_utils:
+            mean_util = sum(link_utils) / len(link_utils)
+            variance = sum((x - mean_util) ** 2 for x in link_utils) / len(link_utils)
+            self.efficiency_metrics['link_utilization_variance'] = variance
+        
+        baseline_util_list = list(baseline_utils.values())
+        if baseline_util_list:
+            baseline_mean = sum(baseline_util_list) / len(baseline_util_list)
+            baseline_variance = sum((x - baseline_mean) ** 2 for x in baseline_util_list) / len(baseline_util_list)
+            self.efficiency_metrics['baseline_link_utilization_variance'] = baseline_variance
+        
+        # Calculate average path lengths
+        lb_paths = [len(path) for path in self.flow_paths.values() if path]
+        sp_paths = []
+        
+        for (src, dst) in self.flow_paths.keys():
+            if src in self.mac_to_dpid and dst in self.mac_to_dpid:
+                s_dpid = self.mac_to_dpid[src]
+                d_dpid = self.mac_to_dpid[dst]
+                sp_path = self._shortest_path_baseline(s_dpid, d_dpid)
+                if sp_path:
+                    sp_paths.append(len(sp_path))
+        
+        if lb_paths:
+            self.efficiency_metrics['avg_path_length_lb'] = sum(lb_paths) / len(lb_paths)
+        if sp_paths:
+            self.efficiency_metrics['avg_path_length_sp'] = sum(sp_paths) / len(sp_paths)
+        
+        # Calculate efficiency percentage
+        runtime = now - self.efficiency_metrics['start_time']
+        if runtime > 0:
+            self.efficiency_metrics['runtime_minutes'] = runtime / 60
 
 class LBRestController(ControllerBase):
     def __init__(self, req, link, data, **cfg):
@@ -510,3 +613,34 @@ class LBRestController(ControllerBase):
             except Exception:
                 return self._cors(json.dumps({"error": "invalid threshold"}), 400)
         return self._cors(json.dumps({"threshold": self.lb.THRESHOLD_BPS}))
+
+    @route('efficiency', '/stats/efficiency', methods=['GET'])
+    def get_efficiency(self, req, **_):
+        """Return load balancer efficiency metrics."""
+        metrics = dict(self.lb.efficiency_metrics)
+        
+        # Calculate derived metrics
+        if metrics['total_flows'] > 0:
+            metrics['load_balancing_rate'] = (metrics['load_balanced_flows'] / metrics['total_flows']) * 100
+            metrics['congestion_avoidance_rate'] = (metrics['congestion_avoided'] / metrics['total_flows']) * 100
+        else:
+            metrics['load_balancing_rate'] = 0
+            metrics['congestion_avoidance_rate'] = 0
+        
+        # Calculate efficiency improvement
+        if metrics['baseline_link_utilization_variance'] > 0:
+            variance_improvement = ((metrics['baseline_link_utilization_variance'] - metrics['link_utilization_variance']) / 
+                                  metrics['baseline_link_utilization_variance']) * 100
+            metrics['variance_improvement_percent'] = max(0, variance_improvement)
+        else:
+            metrics['variance_improvement_percent'] = 0
+        
+        # Path length efficiency
+        if metrics['avg_path_length_sp'] > 0:
+            path_overhead = ((metrics['avg_path_length_lb'] - metrics['avg_path_length_sp']) / 
+                           metrics['avg_path_length_sp']) * 100
+            metrics['path_overhead_percent'] = path_overhead
+        else:
+            metrics['path_overhead_percent'] = 0
+        
+        return self._cors(json.dumps(metrics))
