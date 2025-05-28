@@ -125,15 +125,15 @@ class LoadBalancerREST(app_manager.RyuApp):
         if eth.src not in self.mac_to_dpid:
             self.mac_to_dpid[eth.src] = dpid
             # Try to assign a host name if it looks like a host MAC
-            if self._is_host_mac(eth.src):
-                # Check if this is actually a host (not inter-switch traffic)
-                if self._is_host_port(dpid, in_port):
+            if self._is_host_mac(eth.src) and self._is_host_port(dpid, in_port):
+                # Only create host entries for MACs that haven't been seen and are on edge ports
+                if eth.src not in self.hosts:
                     host_num = len([mac for mac in self.hosts.keys()]) + 1
                     self.hosts[eth.src] = f"h{host_num}"
                     # Track host location
                     self.host_locations.setdefault(dpid, set()).add(eth.src)
-                    self.logger.info("Discovered host %s at switch %s port %s", 
-                                   self.hosts[eth.src], dpid, in_port)
+                    self.logger.info("Discovered host %s (MAC: %s) at switch %s port %s", 
+                                   self.hosts[eth.src], eth.src, dpid, in_port)
         
         if not self.topology_ready:
             self._flood_packet(dp, msg, in_port)
@@ -365,8 +365,9 @@ class LoadBalancerREST(app_manager.RyuApp):
                 
                 if baseline_congested:
                     self.efficiency_metrics['congestion_avoided'] += 1
-                    self.logger.info("Congestion avoided on baseline path %s, congested links: %s (flow %d)", 
-                                   baseline_path, congested_links, self.efficiency_metrics['total_flows'])
+                    self.logger.info("Congestion avoided on baseline path %s, congested links: %s (flow %d, total avoided: %d)", 
+                                   baseline_path, congested_links, self.efficiency_metrics['total_flows'],
+                                   self.efficiency_metrics['congestion_avoided'])
         else:
             self.logger.warning("No baseline path found for %s → %s", s_dpid, d_dpid)
         
@@ -489,13 +490,9 @@ class LoadBalancerREST(app_manager.RyuApp):
                 self.flow_paths[fid] = new_path
                 self.efficiency_metrics['total_reroutes'] += 1
                 
-                # Check if this reroute avoided congestion
-                if len(old_path) > 1:
-                    old_path_congested = any(cost.get((old_path[i], old_path[i+1]), 0) > self.THRESHOLD_BPS 
-                                           for i in range(len(old_path)-1))
-                    if old_path_congested:
-                        self.efficiency_metrics['congestion_avoided'] += 1
-                        self.logger.info("Reroute avoided congestion on path %s", old_path)
+                # Don't double-count congestion avoidance during reroutes
+                # The congestion avoidance metric is already counted during initial flow installation
+                self.logger.info("Rerouted from %s to %s due to changing conditions", old_path, new_path)
 
     def _avg_rate(self, dpid, port, now):
         """
@@ -669,8 +666,23 @@ class LoadBalancerREST(app_manager.RyuApp):
         """
         Determine if a MAC address belongs to a host (heuristic).
         """
-        # Simple heuristic: non-LLDP, non-broadcast MACs learned on edge ports
-        return mac != "ff:ff:ff:ff:ff:ff" and not mac.startswith("01:80:c2")
+        # Filter out broadcast, multicast, and special protocol MACs
+        if mac == "ff:ff:ff:ff:ff:ff":  # Broadcast
+            return False
+        if mac.startswith("01:80:c2"):  # STP/LLDP
+            return False
+        if mac.startswith("01:00:5e"):  # IPv4 multicast
+            return False
+        if mac.startswith("33:33"):     # IPv6 multicast
+            return False
+        if mac.startswith("01:00:0c"):  # Cisco protocols
+            return False
+        
+        # Check if it's a typical host MAC (not all zeros or ones)
+        if mac in ["00:00:00:00:00:00", "11:11:11:11:11:11"]:
+            return False
+            
+        return True
     
     def _is_host_port(self, dpid, port):
         """
@@ -726,13 +738,11 @@ class LoadBalancerREST(app_manager.RyuApp):
         """
         Calculate efficiency metrics comparing load balancing vs baseline routing.
         """
-        if not self.topology_ready or not self.flow_paths:
+        if not self.topology_ready:
             return
         
-        # Calculate current link utilization variance (lower is better)
+        # Calculate current link utilization variance
         link_utils = []
-        baseline_utils = collections.defaultdict(float)
-        
         for (u, v), (pu, pv) in self.links.items():
             if u < v:  # Avoid duplicates
                 rate_u = self._avg_rate(u, pu, now)
@@ -740,53 +750,66 @@ class LoadBalancerREST(app_manager.RyuApp):
                 current_util = max(rate_u, rate_v)
                 link_utils.append(current_util)
         
-        # Calculate what utilization would be with shortest path routing
-        for (src, dst), path in self.flow_paths.items():
-            if src in self.mac_to_dpid and dst in self.mac_to_dpid:
-                s_dpid = self.mac_to_dpid[src]
-                d_dpid = self.mac_to_dpid[dst]
-                baseline_path = self._shortest_path_baseline(s_dpid, d_dpid)
-                
-                if baseline_path:
-                    # Estimate traffic for this flow (simplified)
-                    flow_traffic = 1000000  # 1 Mbps per flow estimate
-                    
-                    # Add traffic to baseline path
-                    for i in range(len(baseline_path) - 1):
-                        u, v = baseline_path[i], baseline_path[i + 1]
-                        key = f"{min(u,v)}-{max(u,v)}"
-                        baseline_utils[key] += flow_traffic
-        
-        # Calculate variances
-        if link_utils:
+        # Calculate variance of current utilization
+        if len(link_utils) > 1:
             mean_util = sum(link_utils) / len(link_utils)
             variance = sum((x - mean_util) ** 2 for x in link_utils) / len(link_utils)
             self.efficiency_metrics['link_utilization_variance'] = variance
-        
-        baseline_util_list = list(baseline_utils.values())
-        if baseline_util_list:
-            baseline_mean = sum(baseline_util_list) / len(baseline_util_list)
-            baseline_variance = sum((x - baseline_mean) ** 2 for x in baseline_util_list) / len(baseline_util_list)
-            self.efficiency_metrics['baseline_link_utilization_variance'] = baseline_variance
+            
+            # For baseline variance, simulate what would happen with shortest path routing
+            # Estimate based on total flows and their shortest paths
+            if self.flow_paths:
+                baseline_utils = collections.defaultdict(float)
+                
+                # Estimate traffic per flow (based on actual measurements if available)
+                avg_flow_traffic = mean_util if mean_util > 0 else 1000000  # 1 Mbps default
+                
+                for (src, dst), current_path in self.flow_paths.items():
+                    if src in self.mac_to_dpid and dst in self.mac_to_dpid:
+                        s_dpid = self.mac_to_dpid[src]
+                        d_dpid = self.mac_to_dpid[dst]
+                        baseline_path = self._shortest_path_baseline(s_dpid, d_dpid)
+                        
+                        if baseline_path and len(baseline_path) > 1:
+                            # Add estimated traffic to baseline path links
+                            for i in range(len(baseline_path) - 1):
+                                u, v = baseline_path[i], baseline_path[i + 1]
+                                key = f"{min(u,v)}-{max(u,v)}"
+                                baseline_utils[key] += avg_flow_traffic
+                
+                # Calculate baseline variance
+                baseline_util_list = list(baseline_utils.values())
+                # Pad with zeros for links not used in baseline routing
+                num_links = len([1 for (u, v) in self.links.keys() if u < v])
+                while len(baseline_util_list) < num_links:
+                    baseline_util_list.append(0)
+                
+                if len(baseline_util_list) > 1:
+                    baseline_mean = sum(baseline_util_list) / len(baseline_util_list)
+                    baseline_variance = sum((x - baseline_mean) ** 2 for x in baseline_util_list) / len(baseline_util_list)
+                    self.efficiency_metrics['baseline_link_utilization_variance'] = baseline_variance
+                    
+                    self.logger.debug("Variance: current=%.2f, baseline=%.2f", variance, baseline_variance)
         
         # Calculate average path lengths
-        lb_paths = [len(path) for path in self.flow_paths.values() if path]
-        sp_paths = []
+        if self.flow_paths:
+            lb_paths = [len(path) for path in self.flow_paths.values() if path]
+            sp_paths = []
+            
+            for (src, dst) in self.flow_paths.keys():
+                if src in self.mac_to_dpid and dst in self.mac_to_dpid:
+                    s_dpid = self.mac_to_dpid[src]
+                    d_dpid = self.mac_to_dpid[dst]
+                    sp_path = self._shortest_path_baseline(s_dpid, d_dpid)
+                    if sp_path:
+                        sp_paths.append(len(sp_path))
+            
+            if lb_paths:
+                self.efficiency_metrics['avg_path_length_lb'] = sum(lb_paths) / len(lb_paths)
+            if sp_paths:
+                self.efficiency_metrics['avg_path_length_sp'] = sum(sp_paths) / len(sp_paths)
         
-        for (src, dst) in self.flow_paths.keys():
-            if src in self.mac_to_dpid and dst in self.mac_to_dpid:
-                s_dpid = self.mac_to_dpid[src]
-                d_dpid = self.mac_to_dpid[dst]
-                sp_path = self._shortest_path_baseline(s_dpid, d_dpid)
-                if sp_path:
-                    sp_paths.append(len(sp_path))
-        
-        if lb_paths:
-            self.efficiency_metrics['avg_path_length_lb'] = sum(lb_paths) / len(lb_paths)
-        if sp_paths:
-            self.efficiency_metrics['avg_path_length_sp'] = sum(sp_paths) / len(sp_paths)
-        
-        # Calculate efficiency percentage
+        # Calculate runtime
         runtime = now - self.efficiency_metrics['start_time']
         if runtime > 0:
             self.efficiency_metrics['runtime_minutes'] = runtime / 60
@@ -844,10 +867,12 @@ class LBRestController(ControllerBase):
                 "host_count": host_count
             })
         
-        # Add host nodes (only discovered hosts)
+        # Add host nodes (only properly discovered hosts)
         for mac, host_name in self.lb.hosts.items():
-            if mac in self.lb.mac_to_dpid:  # Only add if we know where the host is
-                nodes.append({"id": host_name, "type": "host"})
+            # Verify this is still a valid host
+            if (mac in self.lb.mac_to_dpid and 
+                mac in self.lb.host_locations.get(self.lb.mac_to_dpid[mac], set())):
+                nodes.append({"id": host_name, "type": "host", "mac": mac})
         
         # Add switch-to-switch links
         added_links = set()
@@ -856,10 +881,11 @@ class LBRestController(ControllerBase):
                 links.append({"source": f"s{u}", "target": f"s{v}", "type": "switch-switch"})
                 added_links.add((u, v))
         
-        # Add host-to-switch links (only for discovered hosts)
-        for mac, dpid in self.lb.mac_to_dpid.items():
-            if mac in self.lb.hosts:  # Only add links for actual hosts
-                host_name = self.lb.hosts[mac]
+        # Add host-to-switch links (only for verified hosts)
+        for mac, host_name in self.lb.hosts.items():
+            if (mac in self.lb.mac_to_dpid and 
+                mac in self.lb.host_locations.get(self.lb.mac_to_dpid[mac], set())):
+                dpid = self.lb.mac_to_dpid[mac]
                 links.append({"source": host_name, "target": f"s{dpid}", "type": "host-switch"})
         
         return self._cors(json.dumps({"nodes": nodes, "links": links}))
@@ -897,8 +923,8 @@ class LBRestController(ControllerBase):
         congestion_avoided = metrics.get('congestion_avoided', 0)
         
         if total_flows > 0:
-            metrics['load_balancing_rate'] = (load_balanced_flows / total_flows) * 100
-            metrics['congestion_avoidance_rate'] = (congestion_avoided / total_flows) * 100
+            metrics['load_balancing_rate'] = min(100, (load_balanced_flows / total_flows) * 100)
+            metrics['congestion_avoidance_rate'] = min(100, (congestion_avoided / total_flows) * 100)
         else:
             metrics['load_balancing_rate'] = 0
             metrics['congestion_avoidance_rate'] = 0
