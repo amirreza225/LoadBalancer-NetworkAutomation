@@ -195,7 +195,7 @@ class LoadBalancerREST(app_manager.RyuApp):
             return self._select_least_loaded_path(all_paths, cost)
         elif self.load_balancing_mode == LOAD_BALANCING_MODES['weighted_ecmp']:
             return self._select_weighted_path(all_paths, cost)
-        else:  # ROUND_ROBIN
+        elif self.load_balancing_mode == LOAD_BALANCING_MODES['round_robin']:
             return self._select_round_robin_path(all_paths, flow_key)
     
     def _find_k_shortest_paths(self, src, dst, cost, k=3):
