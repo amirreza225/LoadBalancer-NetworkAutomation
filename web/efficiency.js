@@ -99,6 +99,21 @@ function updateMetricsDisplay(metrics) {
     efficiencyScore > 25 ? "fair" : "poor");
 }
 
+// Update algorithm information
+async function updateAlgorithmInfo() {
+  try {
+    const algorithmInfo = await fetchJSON("/stats/algorithm");
+    
+    // Update algorithm mode display
+    updateMetric("algorithmMode", algorithmInfo.current_mode || "Unknown");
+    updateMetric("alternativePaths", algorithmInfo.algorithm_stats?.alternative_paths_stored || 0);
+    updateMetric("congestionTrends", algorithmInfo.algorithm_stats?.congestion_trends_tracked || 0);
+    
+  } catch (error) {
+    console.error("Error updating algorithm info:", error);
+  }
+}
+
 // Helper function to update individual metrics
 function updateMetric(elementId, value, status = null) {
   const element = document.getElementById(elementId);
@@ -151,6 +166,8 @@ document.addEventListener('DOMContentLoaded', function() {
   if (document.getElementById("efficiencyChart")) {
     initEfficiencyChart();
     updateEfficiencyMetrics();
+    updateAlgorithmInfo();
     setInterval(updateEfficiencyMetrics, 5000); // Update every 5 seconds
+    setInterval(updateAlgorithmInfo, 10000); // Update algorithm info every 10 seconds
   }
 });

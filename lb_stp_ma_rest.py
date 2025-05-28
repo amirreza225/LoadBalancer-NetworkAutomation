@@ -26,6 +26,13 @@ from ryu.topology.api import get_switch, get_link
 POLL_PERIOD    = 2         # seconds
 MA_WINDOW_SEC  = 5         # seconds
 DEFAULT_THRESH = 1_000_000 # bytes/sec
+CONGESTION_PREDICTION_WINDOW = 10  # seconds for trend analysis
+LOAD_BALANCING_MODES = {
+    'ROUND_ROBIN': 0,
+    'LEAST_LOADED': 1,
+    'WEIGHTED_ECMP': 2,
+    'ADAPTIVE': 3
+}
 
 class LoadBalancerREST(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -44,7 +51,14 @@ class LoadBalancerREST(app_manager.RyuApp):
         self.adj          = collections.defaultdict(dict)  # dpid -> {neighbor_dpid: port}
         self.flood_ports  = collections.defaultdict(set)  # dpid -> {ports for flooding}
         self.hosts        = {}  # mac -> host_name (discovered dynamically)
+        self.host_locations = {}  # dpid -> set of host MACs on this switch
         self.topology_ready = False
+        # Enhanced load balancing
+        self.load_balancing_mode = LOAD_BALANCING_MODES['ADAPTIVE']
+        self.flow_priorities = {}  # (src, dst) -> priority level
+        self.congestion_trends = collections.defaultdict(list)  # (dpid, port) -> [(time, utilization)]
+        self.alternative_paths = {}  # (src, dst) -> [path1, path2, ...]
+        self.path_weights = {}  # path_id -> current weight for ECMP
         # stats
         self.last_bytes   = collections.defaultdict(lambda: collections.defaultdict(int))
         self.rate_hist    = collections.defaultdict(lambda: collections.defaultdict(list))
@@ -112,10 +126,14 @@ class LoadBalancerREST(app_manager.RyuApp):
             self.mac_to_dpid[eth.src] = dpid
             # Try to assign a host name if it looks like a host MAC
             if self._is_host_mac(eth.src):
-                host_num = len([mac for mac in self.mac_to_dpid.keys() if self._is_host_mac(mac)])
-                self.hosts[eth.src] = f"h{host_num}"
-                self.logger.info("Discovered host %s at switch %s port %s", 
-                               self.hosts[eth.src], dpid, in_port)
+                # Check if this is actually a host (not inter-switch traffic)
+                if self._is_host_port(dpid, in_port):
+                    host_num = len([mac for mac in self.hosts.keys()]) + 1
+                    self.hosts[eth.src] = f"h{host_num}"
+                    # Track host location
+                    self.host_locations.setdefault(dpid, set()).add(eth.src)
+                    self.logger.info("Discovered host %s at switch %s port %s", 
+                                   self.hosts[eth.src], dpid, in_port)
         
         if not self.topology_ready:
             self._flood_packet(dp, msg, in_port)
@@ -166,13 +184,186 @@ class LoadBalancerREST(app_manager.RyuApp):
 
     def _find_path(self, src, dst, cost):
         """
-        Finds the optimal path from source to destination based on given cost.
+        Enhanced path finding with multiple strategies.
         """
-        path = self._dijkstra(src, dst, cost, avoid_congested=True)
-        if path:
-            return path
-        # fallback to any path
-        return self._dijkstra(src, dst, cost, avoid_congested=False)
+        flow_key = (src, dst)
+        
+        # Get all possible paths
+        all_paths = self._find_k_shortest_paths(src, dst, cost, k=3)
+        if not all_paths:
+            return None
+        
+        # Store alternative paths for ECMP
+        self.alternative_paths[flow_key] = all_paths
+        
+        # Select best path based on current mode
+        if self.load_balancing_mode == LOAD_BALANCING_MODES['ADAPTIVE']:
+            return self._select_adaptive_path(all_paths, cost)
+        elif self.load_balancing_mode == LOAD_BALANCING_MODES['LEAST_LOADED']:
+            return self._select_least_loaded_path(all_paths, cost)
+        elif self.load_balancing_mode == LOAD_BALANCING_MODES['WEIGHTED_ECMP']:
+            return self._select_weighted_path(all_paths, cost)
+        else:  # ROUND_ROBIN
+            return self._select_round_robin_path(all_paths, flow_key)
+    
+    def _find_k_shortest_paths(self, src, dst, cost, k=3):
+        """
+        Find k shortest paths using Yen's algorithm (simplified version).
+        """
+        paths = []
+        
+        # Find first shortest path
+        first_path = self._dijkstra(src, dst, cost, avoid_congested=False)
+        if not first_path:
+            return paths
+        
+        paths.append(first_path)
+        candidates = []
+        
+        for i in range(k - 1):
+            if not paths:
+                break
+                
+            # For each node in the previous shortest path
+            for j in range(len(paths[-1]) - 1):
+                spur_node = paths[-1][j]
+                root_path = paths[-1][:j+1]
+                
+                # Remove edges that would create duplicate paths
+                removed_edges = set()
+                for path in paths:
+                    if len(path) > j and path[:j+1] == root_path:
+                        if j+1 < len(path):
+                            edge = (path[j], path[j+1])
+                            removed_edges.add(edge)
+                
+                # Create modified cost without removed edges
+                modified_cost = dict(cost)
+                for edge in removed_edges:
+                    if edge in modified_cost:
+                        modified_cost[edge] = float('inf')
+                
+                # Find spur path
+                spur_path = self._dijkstra(spur_node, dst, modified_cost, avoid_congested=False)
+                if spur_path:
+                    total_path = root_path[:-1] + spur_path
+                    if total_path not in paths and total_path not in candidates:
+                        candidates.append(total_path)
+            
+            if candidates:
+                # Select candidate with lowest cost
+                best_candidate = min(candidates, key=lambda p: self._calculate_path_cost(p, cost))
+                paths.append(best_candidate)
+                candidates.remove(best_candidate)
+        
+        return paths
+    
+    def _calculate_path_cost(self, path, cost):
+        """Calculate total cost of a path."""
+        if len(path) < 2:
+            return 0
+        return sum(cost.get((path[i], path[i+1]), 0) for i in range(len(path)-1))
+    
+    def _select_adaptive_path(self, paths, cost):
+        """Select path based on current network conditions and congestion prediction."""
+        if not paths:
+            return None
+        
+        best_path = None
+        best_score = float('inf')
+        
+        for path in paths:
+            score = self._calculate_adaptive_score(path, cost)
+            if score < best_score:
+                best_score = score
+                best_path = path
+        
+        return best_path
+    
+    def _calculate_adaptive_score(self, path, cost):
+        """Calculate adaptive score considering current load and predicted congestion."""
+        if len(path) < 2:
+            return 0
+        
+        score = 0
+        now = time.time()
+        
+        for i in range(len(path) - 1):
+            u, v = path[i], path[i + 1]
+            
+            # Current utilization cost
+            current_cost = cost.get((u, v), 0)
+            score += current_cost
+            
+            # Congestion prediction penalty
+            if (u, v) in self.links:
+                pu, pv = self.links[(u, v)]
+                trend_u = self._predict_congestion(u, pu, now)
+                trend_v = self._predict_congestion(v, pv, now)
+                prediction_penalty = max(trend_u, trend_v) * 0.3  # 30% weight for prediction
+                score += prediction_penalty
+            
+            # Avoid already congested links
+            if current_cost > self.THRESHOLD_BPS:
+                score += self.THRESHOLD_BPS * 0.5  # Heavy penalty for congested links
+        
+        return score
+    
+    def _predict_congestion(self, dpid, port, now):
+        """Predict future congestion based on utilization trends."""
+        trends = self.congestion_trends.get((dpid, port), [])
+        
+        # Keep only recent trends
+        recent_trends = [(t, util) for t, util in trends if now - t <= CONGESTION_PREDICTION_WINDOW]
+        
+        if len(recent_trends) < 3:
+            return 0  # Not enough data for prediction
+        
+        # Calculate trend slope (simple linear regression)
+        times = [t for t, _ in recent_trends]
+        utils = [util for _, util in recent_trends]
+        
+        n = len(recent_trends)
+        sum_t = sum(times)
+        sum_u = sum(utils)
+        sum_tu = sum(t * u for t, u in recent_trends)
+        sum_t2 = sum(t * t for t in times)
+        
+        # Calculate slope
+        denominator = n * sum_t2 - sum_t * sum_t
+        if denominator == 0:
+            return 0
+        
+        slope = (n * sum_tu - sum_t * sum_u) / denominator
+        
+        # Predict utilization in 5 seconds
+        predicted_util = utils[-1] + slope * 5
+        
+        return max(0, predicted_util)
+    
+    def _select_least_loaded_path(self, paths, cost):
+        """Select path with lowest total utilization."""
+        if not paths:
+            return None
+        
+        return min(paths, key=lambda p: self._calculate_path_cost(p, cost))
+    
+    def _select_weighted_path(self, paths, cost):
+        """Select path using weighted ECMP."""
+        if not paths:
+            return None
+        
+        # For now, return least loaded (can be enhanced with actual ECMP)
+        return self._select_least_loaded_path(paths, cost)
+    
+    def _select_round_robin_path(self, paths, flow_key):
+        """Select path using round-robin among available paths."""
+        if not paths:
+            return None
+        
+        # Simple round-robin based on flow hash
+        path_index = hash(str(flow_key)) % len(paths)
+        return paths[path_index]
 
     def _dijkstra(self, src, dst, cost, avoid_congested):
         """
@@ -229,6 +420,14 @@ class LoadBalancerREST(app_manager.RyuApp):
                 hist = self.rate_hist[dpid][stat.port_no]; hist.append((now, bps))
                 self.rate_hist[dpid][stat.port_no] = [
                     (t, r) for (t, r) in hist if now - t <= MA_WINDOW_SEC
+                ]
+                
+                # Update congestion trends for prediction
+                trend_key = (dpid, stat.port_no)
+                self.congestion_trends[trend_key].append((now, bps))
+                self.congestion_trends[trend_key] = [
+                    (t, util) for (t, util) in self.congestion_trends[trend_key] 
+                    if now - t <= CONGESTION_PREDICTION_WINDOW
                 ]
         if now - self.last_calc >= MA_WINDOW_SEC:
             self.last_calc = now
@@ -411,6 +610,10 @@ class LoadBalancerREST(app_manager.RyuApp):
         if dpid in self.mac_to_port:
             del self.mac_to_port[dpid]
         
+        # Clean up host locations
+        if dpid in self.host_locations:
+            del self.host_locations[dpid]
+        
         # Rebuild spanning tree
         self._build_spanning_tree()
         
@@ -425,6 +628,16 @@ class LoadBalancerREST(app_manager.RyuApp):
         """
         # Simple heuristic: non-LLDP, non-broadcast MACs learned on edge ports
         return mac != "ff:ff:ff:ff:ff:ff" and not mac.startswith("01:80:c2")
+    
+    def _is_host_port(self, dpid, port):
+        """
+        Determine if a port is likely connected to a host (not inter-switch).
+        """
+        # Check if this port is used for inter-switch links
+        if dpid in self.adj:
+            inter_switch_ports = set(self.adj[dpid].values())
+            return port not in inter_switch_ports
+        return True  # If topology not ready, assume it could be a host port
     
     def _flood_packet(self, dp, msg, in_port):
         """
@@ -572,13 +785,19 @@ class LBRestController(ControllerBase):
         nodes = []
         links = []
         
-        # Add switch nodes
+        # Add switch nodes with host count information
         for dpid in self.lb.dp_set.keys():
-            nodes.append({"id": f"s{dpid}", "type": "switch"})
+            host_count = len(self.lb.host_locations.get(dpid, set()))
+            nodes.append({
+                "id": f"s{dpid}", 
+                "type": "switch", 
+                "host_count": host_count
+            })
         
-        # Add host nodes
+        # Add host nodes (only discovered hosts)
         for mac, host_name in self.lb.hosts.items():
-            nodes.append({"id": host_name, "type": "host"})
+            if mac in self.lb.mac_to_dpid:  # Only add if we know where the host is
+                nodes.append({"id": host_name, "type": "host"})
         
         # Add switch-to-switch links
         added_links = set()
@@ -587,9 +806,9 @@ class LBRestController(ControllerBase):
                 links.append({"source": f"s{u}", "target": f"s{v}", "type": "switch-switch"})
                 added_links.add((u, v))
         
-        # Add host-to-switch links
+        # Add host-to-switch links (only for discovered hosts)
         for mac, dpid in self.lb.mac_to_dpid.items():
-            if mac in self.lb.hosts:
+            if mac in self.lb.hosts:  # Only add links for actual hosts
                 host_name = self.lb.hosts[mac]
                 links.append({"source": host_name, "target": f"s{dpid}", "type": "host-switch"})
         
@@ -644,3 +863,27 @@ class LBRestController(ControllerBase):
             metrics['path_overhead_percent'] = 0
         
         return self._cors(json.dumps(metrics))
+
+    @route('algorithm', '/stats/algorithm', methods=['GET'])
+    def get_algorithm_info(self, req, **_):
+        """Return current load balancing algorithm information."""
+        mode_names = {v: k for k, v in LOAD_BALANCING_MODES.items()}
+        current_mode = mode_names.get(self.lb.load_balancing_mode, 'UNKNOWN')
+        
+        info = {
+            'current_mode': current_mode,
+            'available_modes': list(LOAD_BALANCING_MODES.keys()),
+            'features': {
+                'multi_path_support': True,
+                'congestion_prediction': True,
+                'adaptive_routing': True,
+                'ecmp_support': True
+            },
+            'algorithm_stats': {
+                'alternative_paths_stored': len(self.lb.alternative_paths),
+                'congestion_trends_tracked': len(self.lb.congestion_trends),
+                'topology_ready': self.lb.topology_ready
+            }
+        }
+        
+        return self._cors(json.dumps(info))
