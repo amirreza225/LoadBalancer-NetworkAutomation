@@ -25,7 +25,7 @@ from ryu.topology.api import get_switch, get_link
 
 POLL_PERIOD    = 2         # seconds
 MA_WINDOW_SEC  = 5         # seconds
-DEFAULT_THRESH = 50_000_000 # bytes/sec
+DEFAULT_THRESH = 25_000_000 # bytes/sec
 CONGESTION_PREDICTION_WINDOW = 10  # seconds for trend analysis
 LOAD_BALANCING_MODES = {
     'round_robin': 0,
