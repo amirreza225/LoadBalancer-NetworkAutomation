@@ -136,6 +136,13 @@ footer{
         <button id="toggle">Pause</button>
         <label>Threshold <input type="range" id="thSlider" min="2" max="1000" step="50">
           <span id="thVal"></span> Mbps</label>
+        <br><br>
+        <label>Mode <select id="modeSelect">
+          <option value="adaptive">Adaptive</option>
+          <option value="least_loaded">Least Loaded</option>
+          <option value="weighted_ecmp">Weighted ECMP</option>
+          <option value="round_robin">Round Robin</option>
+        </select></label>
       </div></div>
     
     <!-- Efficiency Metrics Section -->

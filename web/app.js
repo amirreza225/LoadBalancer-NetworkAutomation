@@ -144,6 +144,9 @@ function attachUI() {
   // Threshold slider
   const slider = document.getElementById("thSlider");
   const valSpan = document.getElementById("thVal");
+  
+  // Mode selector
+  const modeSelect = document.getElementById("modeSelect");
 
   fetchJSON("/config/threshold")
     .then(obj => {
@@ -161,6 +164,24 @@ function attachUI() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ threshold: thresholdBytes })
+    });
+  };
+  
+  // Load current mode
+  fetchJSON("/config/mode")
+    .then(obj => {
+      if (obj.mode) {
+        modeSelect.value = obj.mode;
+      }
+    })
+    .catch(() => {}); // Ignore if endpoint doesn't exist yet
+  
+  // Mode change handler
+  modeSelect.onchange = () => {
+    fetch(API + "/config/mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: modeSelect.value })
     });
   };
 }

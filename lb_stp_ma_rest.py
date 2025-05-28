@@ -352,10 +352,13 @@ class LoadBalancerREST(app_manager.RyuApp):
                 self.logger.info("Flow %d using shortest path %s", 
                                self.efficiency_metrics['total_flows'], path)
             
-            # Check if we avoided congestion on the baseline path
+            # Check if we avoided congestion (either current or predicted)
             if len(baseline_path) > 1:
                 baseline_congested = False
+                predicted_congestion = False
                 congested_links = []
+                
+                # Check current congestion
                 for i in range(len(baseline_path) - 1):
                     u, v = baseline_path[i], baseline_path[i + 1]
                     link_cost = cost.get((u, v), 0)
@@ -363,10 +366,32 @@ class LoadBalancerREST(app_manager.RyuApp):
                         baseline_congested = True
                         congested_links.append(f"{u}-{v}")
                 
-                if baseline_congested:
+                # Also check if we predicted congestion on baseline path
+                if not baseline_congested and path != baseline_path:
+                    # If we chose a different path, check if baseline would become congested
+                    baseline_cost = self._calculate_path_cost(baseline_path, cost)
+                    chosen_cost = self._calculate_path_cost(path, cost)
+                    
+                    # Count as congestion avoidance if:
+                    # 1. We chose a different path with better utilization, OR
+                    # 2. Any link in baseline is > 70% of threshold (predictive)
+                    if chosen_cost < baseline_cost:
+                        predicted_congestion = True
+                        congested_links.append("predicted better utilization")
+                    else:
+                        for i in range(len(baseline_path) - 1):
+                            u, v = baseline_path[i], baseline_path[i + 1]
+                            link_cost = cost.get((u, v), 0)
+                            if link_cost > self.THRESHOLD_BPS * 0.7:  # 70% threshold for prediction
+                                predicted_congestion = True
+                                congested_links.append(f"{u}-{v} (predicted)")
+                                break
+                
+                if baseline_congested or predicted_congestion:
                     self.efficiency_metrics['congestion_avoided'] += 1
-                    self.logger.info("Congestion avoided on baseline path %s, congested links: %s (flow %d, total avoided: %d)", 
-                                   baseline_path, congested_links, self.efficiency_metrics['total_flows'],
+                    reason = "current" if baseline_congested else "predicted"
+                    self.logger.info("Congestion avoided (%s) on baseline path %s, affected links: %s (flow %d, total avoided: %d)", 
+                                   reason, baseline_path, congested_links, self.efficiency_metrics['total_flows'],
                                    self.efficiency_metrics['congestion_avoided'])
         else:
             self.logger.warning("No baseline path found for %s → %s", s_dpid, d_dpid)
@@ -973,6 +998,27 @@ class LBRestController(ControllerBase):
         }
         
         return self._cors(json.dumps(info))
+
+    @route('mode', '/config/mode', methods=['GET', 'POST', 'OPTIONS'])
+    def mode_config(self, req, **_):
+        """Get or set load balancing mode."""
+        if req.method == 'OPTIONS':
+            return self._cors('', 200)
+        if req.method == 'POST':
+            try:
+                mode_name = req.json.get('mode', '')
+                if mode_name not in LOAD_BALANCING_MODES:
+                    return self._cors(json.dumps({"error": "invalid mode"}), 400)
+                self.lb.load_balancing_mode = LOAD_BALANCING_MODES[mode_name]
+                self.lb.logger.info("Load balancing mode changed to: %s", mode_name)
+            except Exception as e:
+                self.lb.logger.error("Error setting mode: %s", e)
+                return self._cors(json.dumps({"error": "invalid mode"}), 400)
+        
+        # Return current mode
+        mode_names = {v: k for k, v in LOAD_BALANCING_MODES.items()}
+        current_mode = mode_names.get(self.lb.load_balancing_mode, 'adaptive')
+        return self._cors(json.dumps({"mode": current_mode}))
 
     @route('debug', '/debug/metrics', methods=['GET'])
     def debug_metrics(self, req, **_):

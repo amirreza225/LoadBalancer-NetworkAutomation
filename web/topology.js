@@ -10,8 +10,8 @@ let gLink, gNode;
 const svg = d3.select("svg"), width = +svg.attr("width"), height = +svg.attr("height");
 
 const linkColor = bps => {
-  // Use the global threshold from app.js
-  const currentThreshold = window.threshold || THRESH_DEFAULT;
+  // Use the global threshold from app.js (convert Mbps to bytes/s)
+  const currentThreshold = (window.threshold || 100) * 1000000;
   if (bps > currentThreshold * linkThreshold.high) return "red";
   if (bps > currentThreshold * linkThreshold.low) return "orange";
   return "green";
