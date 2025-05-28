@@ -142,8 +142,9 @@ class LoadBalancerREST(app_manager.RyuApp):
         # Host-to-host routing
         if eth.dst in self.mac_to_dpid:
             fid = (eth.src, eth.dst)
+            s_dpid, d_dpid = self.mac_to_dpid[eth.src], self.mac_to_dpid[eth.dst]
+            
             if fid not in self.flow_paths:
-                s_dpid, d_dpid = self.mac_to_dpid[eth.src], self.mac_to_dpid[eth.dst]
                 cost = self._calculate_link_costs(time.time())
                 path = self._find_path(s_dpid, d_dpid, cost)
                 if path:
@@ -153,17 +154,8 @@ class LoadBalancerREST(app_manager.RyuApp):
                     dst_name = self.hosts.get(eth.dst, eth.dst)
                     self.logger.info("Installed path %s→%s: %s", src_name, dst_name, path)
                     
-                    # Update efficiency metrics
-                    self.efficiency_metrics['total_flows'] += 1
-                    baseline_path = self._shortest_path_baseline(s_dpid, d_dpid)
-                    if baseline_path and path != baseline_path:
-                        self.efficiency_metrics['load_balanced_flows'] += 1
-                        # Check if we avoided congestion on the baseline path
-                        if len(baseline_path) > 1:
-                            avoided_congestion = any(cost.get((baseline_path[i], baseline_path[i+1]), 0) > self.THRESHOLD_BPS 
-                                                   for i in range(len(baseline_path)-1))
-                            if avoided_congestion:
-                                self.efficiency_metrics['congestion_avoided'] += 1
+                    # Update efficiency metrics for new flows
+                    self._update_flow_metrics(s_dpid, d_dpid, path, cost)
             
             path = self.flow_paths.get(fid)
             if path:
@@ -341,6 +333,49 @@ class LoadBalancerREST(app_manager.RyuApp):
         
         return max(0, predicted_util)
     
+    def _update_flow_metrics(self, s_dpid, d_dpid, path, cost):
+        """Update efficiency metrics for a new flow."""
+        self.efficiency_metrics['total_flows'] += 1
+        
+        # Get baseline shortest path
+        baseline_path = self._shortest_path_baseline(s_dpid, d_dpid)
+        
+        self.logger.info("Flow metrics update - Path: %s, Baseline: %s", path, baseline_path)
+        
+        if baseline_path:
+            # Check if we're using a different path than shortest path
+            if path != baseline_path:
+                self.efficiency_metrics['load_balanced_flows'] += 1
+                self.logger.info("Load balanced flow %d: using path %s instead of baseline %s", 
+                                self.efficiency_metrics['total_flows'], path, baseline_path)
+            else:
+                self.logger.info("Flow %d using shortest path %s", 
+                               self.efficiency_metrics['total_flows'], path)
+            
+            # Check if we avoided congestion on the baseline path
+            if len(baseline_path) > 1:
+                baseline_congested = False
+                congested_links = []
+                for i in range(len(baseline_path) - 1):
+                    u, v = baseline_path[i], baseline_path[i + 1]
+                    link_cost = cost.get((u, v), 0)
+                    if link_cost > self.THRESHOLD_BPS:
+                        baseline_congested = True
+                        congested_links.append(f"{u}-{v}")
+                
+                if baseline_congested:
+                    self.efficiency_metrics['congestion_avoided'] += 1
+                    self.logger.info("Congestion avoided on baseline path %s, congested links: %s (flow %d)", 
+                                   baseline_path, congested_links, self.efficiency_metrics['total_flows'])
+        else:
+            self.logger.warning("No baseline path found for %s → %s", s_dpid, d_dpid)
+        
+        # Log metrics update
+        self.logger.info("Metrics updated: total=%d, load_balanced=%d, congestion_avoided=%d",
+                         self.efficiency_metrics['total_flows'],
+                         self.efficiency_metrics['load_balanced_flows'],
+                         self.efficiency_metrics['congestion_avoided'])
+    
     def _select_least_loaded_path(self, paths, cost):
         """Select path with lowest total utilization."""
         if not paths:
@@ -449,10 +484,18 @@ class LoadBalancerREST(app_manager.RyuApp):
             if new_path and new_path != old_path:
                 src_name = self.hosts.get(src, src)
                 dst_name = self.hosts.get(dst, dst)
-                self.logger.info("Re-routing %s→%s: %s", src_name, dst_name, new_path)
+                self.logger.info("Re-routing %s→%s: %s → %s", src_name, dst_name, old_path, new_path)
                 self._install_path(new_path, src, dst)
                 self.flow_paths[fid] = new_path
                 self.efficiency_metrics['total_reroutes'] += 1
+                
+                # Check if this reroute avoided congestion
+                if len(old_path) > 1:
+                    old_path_congested = any(cost.get((old_path[i], old_path[i+1]), 0) > self.THRESHOLD_BPS 
+                                           for i in range(len(old_path)-1))
+                    if old_path_congested:
+                        self.efficiency_metrics['congestion_avoided'] += 1
+                        self.logger.info("Reroute avoided congestion on path %s", old_path)
 
     def _avg_rate(self, dpid, port, now):
         """
@@ -669,8 +712,15 @@ class LoadBalancerREST(app_manager.RyuApp):
         Calculate shortest path without considering congestion (baseline comparison).
         """
         # Use hop count as cost (traditional shortest path)
-        uniform_cost = {(u, v): 1 for (u, v) in self.links.keys()}
-        return self._dijkstra(src, dst, uniform_cost, avoid_congested=False)
+        uniform_cost = {}
+        for (u, v) in self.links.keys():
+            if u < v:  # Avoid duplicates - only add each link once
+                uniform_cost[(u, v)] = 1
+                uniform_cost[(v, u)] = 1
+        
+        baseline_path = self._dijkstra(src, dst, uniform_cost, avoid_congested=False)
+        self.logger.debug("Baseline path from %s to %s: %s", src, dst, baseline_path)
+        return baseline_path
     
     def _calculate_efficiency_metrics(self, now):
         """
@@ -838,13 +888,23 @@ class LBRestController(ControllerBase):
         """Return load balancer efficiency metrics."""
         metrics = dict(self.lb.efficiency_metrics)
         
+        # Add debug logging
+        self.lb.logger.debug("Raw efficiency metrics: %s", metrics)
+        
         # Calculate derived metrics
-        if metrics['total_flows'] > 0:
-            metrics['load_balancing_rate'] = (metrics['load_balanced_flows'] / metrics['total_flows']) * 100
-            metrics['congestion_avoidance_rate'] = (metrics['congestion_avoided'] / metrics['total_flows']) * 100
+        total_flows = metrics.get('total_flows', 0)
+        load_balanced_flows = metrics.get('load_balanced_flows', 0) 
+        congestion_avoided = metrics.get('congestion_avoided', 0)
+        
+        if total_flows > 0:
+            metrics['load_balancing_rate'] = (load_balanced_flows / total_flows) * 100
+            metrics['congestion_avoidance_rate'] = (congestion_avoided / total_flows) * 100
         else:
             metrics['load_balancing_rate'] = 0
             metrics['congestion_avoidance_rate'] = 0
+        
+        self.lb.logger.debug("Calculated rates: LB=%.1f%%, CA=%.1f%%", 
+                           metrics['load_balancing_rate'], metrics['congestion_avoidance_rate'])
         
         # Calculate efficiency improvement
         if metrics['baseline_link_utilization_variance'] > 0:
@@ -887,3 +947,17 @@ class LBRestController(ControllerBase):
         }
         
         return self._cors(json.dumps(info))
+
+    @route('debug', '/debug/metrics', methods=['GET'])
+    def debug_metrics(self, req, **_):
+        """Debug endpoint to check raw metrics."""
+        debug_info = {
+            'raw_efficiency_metrics': dict(self.lb.efficiency_metrics),
+            'flow_paths_count': len(self.lb.flow_paths),
+            'flow_paths': {f"{src}→{dst}": path for (src, dst), path in self.lb.flow_paths.items()},
+            'hosts_discovered': dict(self.lb.hosts),
+            'topology_ready': self.lb.topology_ready,
+            'links_count': len(self.lb.links),
+            'current_threshold': self.lb.THRESHOLD_BPS
+        }
+        return self._cors(json.dumps(debug_info))
