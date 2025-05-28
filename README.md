@@ -13,6 +13,9 @@ This project implements an intelligent, adaptive load balancer in a Software Def
 - **Goal**: Minimize congestion, predict network bottlenecks, and optimize flow paths using advanced algorithms
 
 ---
+## UI Screenshot
+![Alt text](UI.png?raw=true "Title")
+---
 
 ## 🔧 Enhanced Architecture
 
