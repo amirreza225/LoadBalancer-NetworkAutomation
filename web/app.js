@@ -2,7 +2,7 @@
 const API = "http://localhost:8080";
 const POLL_INTERVAL = 1000;   // ms
 const MAX_POINTS = 20;        // data points per line
-window.threshold = 1000000;   // initial B/s - make it global for topology.js
+window.threshold = 100;   // initial Mbps - make it global for topology.js
 let paused = false;
 
 // A fixed, distinguishable palette
@@ -72,7 +72,7 @@ async function updateChart() {
     const ds = datasets[link];
     ds.data.push({ x: now, y: bps });
     if (ds.data.length > MAX_POINTS) ds.data.shift();
-    if (bps > window.threshold) hot.push({ link, bps });
+    if (bps > (window.threshold * 1000000)) hot.push({ link, bps });
   });
 
   chart.update();
@@ -91,7 +91,7 @@ function updateHotList(hot) {
   hot.forEach(({ link, bps }) => {
     const li = document.createElement("li");
     li.className = "hot";
-    li.textContent = `${link} : ${bps.toFixed(0)} B/s`;
+    li.textContent = `${link} : ${(bps / 1000000).toFixed(1)} Mbps`;
     ul.appendChild(li);
   });
 }
@@ -147,18 +147,20 @@ function attachUI() {
 
   fetchJSON("/config/threshold")
     .then(obj => {
-      window.threshold = obj.threshold;
+      window.threshold = Math.round(obj.threshold / 1000000); // Convert B/s to Mbps
       slider.value = window.threshold;
       valSpan.textContent = window.threshold;
     });
 
   slider.oninput = () => { valSpan.textContent = slider.value; };
   slider.onchange = () => {
-    window.threshold = parseInt(slider.value, 10);
+    const thresholdMbps = parseInt(slider.value, 10);
+    window.threshold = thresholdMbps;
+    const thresholdBytes = thresholdMbps * 1000000; // Convert Mbps to B/s
     fetch(API + "/config/threshold", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ threshold: window.threshold })
+      body: JSON.stringify({ threshold: thresholdBytes })
     });
   };
 }
