@@ -98,13 +98,31 @@ function updateHotList(hot) {
 
 // Fetch and display all active flow paths
 async function updatePathsDisplay() {
-  const pathsObj = await fetchJSON("/load/path");
-  // pathsObj is now an object: { "MAC1->MAC2": [1,2,3], ... }
-  const lines = Object.entries(pathsObj).map(([flow, path]) => {
-    return `${flow} : [ ${path.join(" → ")} ]`;
-  });
-  document.getElementById("path").innerHTML = 
-    "<li>" + lines.join("<li>");
+  try {
+    const pathsObj = await fetchJSON("/load/path");
+    const pathContainer = document.getElementById("path");
+    
+    if (!pathsObj || Object.keys(pathsObj).length === 0) {
+      pathContainer.innerHTML = "<li class='ok'>No active flows</li>";
+      return;
+    }
+    
+    // pathsObj is now an object: { "h1→h2": [1,2,3], ... }
+    const lines = Object.entries(pathsObj).map(([flow, path]) => {
+      if (!path || !Array.isArray(path) || path.length === 0) {
+        return `${flow} : No path found`;
+      }
+      
+      // Format path with switch names
+      const formattedPath = path.map(dpid => `s${dpid}`).join(" → ");
+      return `${flow} : ${formattedPath}`;
+    });
+    
+    pathContainer.innerHTML = lines.map(line => `<li>${line}</li>`).join("");
+  } catch (error) {
+    console.error("Error updating paths display:", error);
+    document.getElementById("path").innerHTML = "<li class='error'>Error loading paths</li>";
+  }
 }
 
 // Simple fetch wrapper
