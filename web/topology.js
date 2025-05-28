@@ -1,6 +1,5 @@
 const linkThreshold = { low: 0.3, high: 1.0 };
 const THRESH_DEFAULT = 1000000;
-let threshold = THRESH_DEFAULT;
 
 // Dynamic topology data - will be populated from API
 let nodes = [];
@@ -11,8 +10,10 @@ let gLink, gNode;
 const svg = d3.select("svg"), width = +svg.attr("width"), height = +svg.attr("height");
 
 const linkColor = bps => {
-  if (bps > threshold * linkThreshold.high) return "red";
-  if (bps > threshold * linkThreshold.low) return "orange";
+  // Use the global threshold from app.js
+  const currentThreshold = window.threshold || THRESH_DEFAULT;
+  if (bps > currentThreshold * linkThreshold.high) return "red";
+  if (bps > currentThreshold * linkThreshold.low) return "orange";
   return "green";
 };
 
@@ -178,14 +179,6 @@ function drag(simulation) {
 
 // Initialize when DOM is loaded
 document.addEventListener('DOMContentLoaded', function() {
-  // Fetch initial threshold configuration
-  fetch(`${API}/config/threshold`)
-    .then(res => res.json())
-    .then(cfg => {
-      if (cfg.threshold) threshold = cfg.threshold;
-    })
-    .catch(err => console.error("Error fetching threshold:", err));
-  
   // Initialize topology visualization
   initTopology();
 });

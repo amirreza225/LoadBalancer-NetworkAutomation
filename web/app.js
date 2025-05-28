@@ -2,7 +2,7 @@
 const API = "http://localhost:8080";
 const POLL_INTERVAL = 1000;   // ms
 const MAX_POINTS = 20;        // data points per line
-let threshold = 1000000;      // initial B/s
+window.threshold = 1000000;   // initial B/s - make it global for topology.js
 let paused = false;
 
 // A fixed, distinguishable palette
@@ -72,7 +72,7 @@ async function updateChart() {
     const ds = datasets[link];
     ds.data.push({ x: now, y: bps });
     if (ds.data.length > MAX_POINTS) ds.data.shift();
-    if (bps > threshold) hot.push({ link, bps });
+    if (bps > window.threshold) hot.push({ link, bps });
   });
 
   chart.update();
@@ -147,18 +147,18 @@ function attachUI() {
 
   fetchJSON("/config/threshold")
     .then(obj => {
-      threshold = obj.threshold;
-      slider.value = threshold;
-      valSpan.textContent = threshold;
+      window.threshold = obj.threshold;
+      slider.value = window.threshold;
+      valSpan.textContent = window.threshold;
     });
 
   slider.oninput = () => { valSpan.textContent = slider.value; };
   slider.onchange = () => {
-    threshold = parseInt(slider.value, 10);
+    window.threshold = parseInt(slider.value, 10);
     fetch(API + "/config/threshold", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ threshold })
+      body: JSON.stringify({ threshold: window.threshold })
     });
   };
 }
