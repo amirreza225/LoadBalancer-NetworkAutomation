@@ -442,13 +442,13 @@ class LoadBalancerREST(app_manager.RyuApp):
                 self.logger.info("Flow %d using shortest path %s", 
                                self.efficiency_metrics['total_flows'], path)
             
-            # Check if we avoided congestion (either current or predicted)
+            # Check if we avoided congestion (only count actual congestion scenarios)
             if len(baseline_path) > 1:
                 baseline_congested = False
                 predicted_congestion = False
                 congested_links = []
                 
-                # Check current congestion
+                # Check current congestion on baseline path
                 for i in range(len(baseline_path) - 1):
                     u, v = baseline_path[i], baseline_path[i + 1]
                     link_cost = cost.get((u, v), 0)
@@ -456,28 +456,20 @@ class LoadBalancerREST(app_manager.RyuApp):
                         baseline_congested = True
                         congested_links.append(f"{u}-{v}")
                 
-                # Also check if we predicted congestion on baseline path
-                if not baseline_congested and path != baseline_path:
-                    # If we chose a different path, check if baseline would become congested
-                    baseline_cost = self._calculate_path_cost(baseline_path, cost)
-                    chosen_cost = self._calculate_path_cost(path, cost)
-                    
-                    # Count as congestion avoidance if:
-                    # 1. We chose a different path with better utilization, OR
-                    # 2. Any link in baseline is > 70% of threshold (predictive)
-                    if chosen_cost < baseline_cost:
-                        predicted_congestion = True
-                        congested_links.append("predicted better utilization")
-                    else:
-                        for i in range(len(baseline_path) - 1):
-                            u, v = baseline_path[i], baseline_path[i + 1]
-                            link_cost = cost.get((u, v), 0)
-                            if link_cost > self.THRESHOLD_BPS * 0.7:  # 70% threshold for prediction
-                                predicted_congestion = True
-                                congested_links.append(f"{u}-{v} (predicted)")
-                                break
+                # Check predicted congestion on baseline path (>70% threshold)
+                if not baseline_congested:
+                    for i in range(len(baseline_path) - 1):
+                        u, v = baseline_path[i], baseline_path[i + 1]
+                        link_cost = cost.get((u, v), 0)
+                        if link_cost > self.THRESHOLD_BPS * 0.7:  # 70% threshold for prediction
+                            predicted_congestion = True
+                            congested_links.append(f"{u}-{v} (predicted)")
+                            break
                 
-                if baseline_congested or predicted_congestion:
+                # Only count as congestion avoidance if:
+                # 1. Baseline path has actual congestion (current or predicted), AND
+                # 2. We chose a different path
+                if (baseline_congested or predicted_congestion) and path != baseline_path:
                     self.efficiency_metrics['congestion_avoided'] += 1
                     reason = "current" if baseline_congested else "predicted"
                     self.logger.info("Congestion avoided (%s) on baseline path %s, affected links: %s (flow %d, total avoided: %d)", 
@@ -486,11 +478,28 @@ class LoadBalancerREST(app_manager.RyuApp):
         else:
             self.logger.warning("No baseline path found for %s → %s", s_dpid, d_dpid)
         
-        # Log metrics update
+        # Log metrics update with validation
+        total_flows = self.efficiency_metrics['total_flows']
+        load_balanced = self.efficiency_metrics['load_balanced_flows']
+        congestion_avoided = self.efficiency_metrics['congestion_avoided']
+        
         self.logger.info("Metrics updated: total=%d, load_balanced=%d, congestion_avoided=%d",
-                         self.efficiency_metrics['total_flows'],
-                         self.efficiency_metrics['load_balanced_flows'],
-                         self.efficiency_metrics['congestion_avoided'])
+                         total_flows, load_balanced, congestion_avoided)
+        
+        # Validation checks
+        if load_balanced > total_flows:
+            self.logger.warning("Load balanced flows (%d) exceeds total flows (%d)", 
+                              load_balanced, total_flows)
+        if congestion_avoided > total_flows:
+            self.logger.warning("Congestion avoided (%d) exceeds total flows (%d)", 
+                              congestion_avoided, total_flows)
+        
+        # Calculate and log rates for validation
+        if total_flows > 0:
+            lb_rate = (load_balanced / total_flows) * 100
+            ca_rate = (congestion_avoided / total_flows) * 100
+            self.logger.debug("Current rates: Load Balancing=%.1f%%, Congestion Avoidance=%.1f%%", 
+                            lb_rate, ca_rate)
     
     def _select_least_loaded_path(self, paths, cost):
         """Select path with lowest total utilization."""
@@ -1195,12 +1204,13 @@ class LoadBalancerREST(app_manager.RyuApp):
             self.efficiency_metrics['link_utilization_variance'] = variance
             
             # For baseline variance, simulate what would happen with shortest path routing
-            # Estimate based on total flows and their shortest paths
+            # Use uniform traffic distribution for true baseline comparison
             if self.flow_paths:
                 baseline_utils = collections.defaultdict(float)
                 
-                # Estimate traffic per flow (based on actual measurements if available)
-                avg_flow_traffic = mean_util if mean_util > 0 else 1000000  # 1 Mbps default
+                # Use fixed traffic estimate per flow to avoid circular logic
+                # This represents typical flow size for fair comparison
+                STANDARD_FLOW_TRAFFIC = 5_000_000  # 5 Mbps per flow for baseline simulation
                 
                 for (src, dst), current_path in self.flow_paths.items():
                     if src in self.mac_to_dpid and dst in self.mac_to_dpid:
@@ -1209,11 +1219,11 @@ class LoadBalancerREST(app_manager.RyuApp):
                         baseline_path = self._shortest_path_baseline(s_dpid, d_dpid)
                         
                         if baseline_path and len(baseline_path) > 1:
-                            # Add estimated traffic to baseline path links
+                            # Add standard traffic to baseline path links
                             for i in range(len(baseline_path) - 1):
                                 u, v = baseline_path[i], baseline_path[i + 1]
                                 key = f"{min(u,v)}-{max(u,v)}"
-                                baseline_utils[key] += avg_flow_traffic
+                                baseline_utils[key] += STANDARD_FLOW_TRAFFIC
                 
                 # Calculate baseline variance
                 baseline_util_list = list(baseline_utils.values())
@@ -1227,7 +1237,21 @@ class LoadBalancerREST(app_manager.RyuApp):
                     baseline_variance = sum((x - baseline_mean) ** 2 for x in baseline_util_list) / len(baseline_util_list)
                     self.efficiency_metrics['baseline_link_utilization_variance'] = baseline_variance
                     
-                    self.logger.debug("Variance: current=%.2f, baseline=%.2f", variance, baseline_variance)
+                    # Enhanced debug logging with validation
+                    variance_improvement = 0
+                    if baseline_variance > 0:
+                        variance_improvement = ((baseline_variance - variance) / baseline_variance) * 100
+                    
+                    self.logger.debug("Variance calculation: current=%.2f, baseline=%.2f, improvement=%.1f%%", 
+                                    variance, baseline_variance, variance_improvement)
+                    
+                    # Validation checks
+                    if variance < 0 or baseline_variance < 0:
+                        self.logger.warning("Negative variance detected: current=%.2f, baseline=%.2f", 
+                                          variance, baseline_variance)
+                    if variance_improvement > 100:
+                        self.logger.warning("Unrealistic variance improvement: %.1f%% (may indicate calculation error)", 
+                                          variance_improvement)
         
         # Calculate average path lengths
         if self.flow_paths:
@@ -1367,14 +1391,29 @@ class LBRestController(ControllerBase):
             metrics['load_balancing_rate'] = 0
             metrics['congestion_avoidance_rate'] = 0
         
+        # Enhanced validation and logging
         self.lb.logger.debug("Calculated rates: LB=%.1f%%, CA=%.1f%%", 
                            metrics['load_balancing_rate'], metrics['congestion_avoidance_rate'])
         
-        # Calculate efficiency improvement
-        if metrics['baseline_link_utilization_variance'] > 0:
-            variance_improvement = ((metrics['baseline_link_utilization_variance'] - metrics['link_utilization_variance']) / 
+        # Validation checks for API response
+        if metrics['load_balancing_rate'] > 100:
+            self.lb.logger.warning("Load balancing rate exceeds 100%%: %.1f%%", metrics['load_balancing_rate'])
+            metrics['load_balancing_rate'] = 100
+        
+        if metrics['congestion_avoidance_rate'] > 100:
+            self.lb.logger.warning("Congestion avoidance rate exceeds 100%%: %.1f%%", metrics['congestion_avoidance_rate'])
+            metrics['congestion_avoidance_rate'] = 100
+        
+        # Calculate efficiency improvement with validation
+        if metrics.get('baseline_link_utilization_variance', 0) > 0:
+            variance_improvement = ((metrics['baseline_link_utilization_variance'] - metrics.get('link_utilization_variance', 0)) / 
                                   metrics['baseline_link_utilization_variance']) * 100
-            metrics['variance_improvement_percent'] = max(0, variance_improvement)
+            metrics['variance_improvement_percent'] = max(0, min(200, variance_improvement))  # Cap at 200% improvement
+            
+            # Log warning for extreme values
+            if variance_improvement > 150:
+                self.lb.logger.warning("Very high variance improvement: %.1f%% (may indicate calculation issue)", 
+                                     variance_improvement)
         else:
             metrics['variance_improvement_percent'] = 0
         

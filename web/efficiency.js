@@ -152,35 +152,41 @@ function updateMetric(elementId, value, status = null) {
   }
 }
 
-// Calculate composite efficiency score
+// Calculate composite efficiency score based on network engineering principles
 function calculateEfficiencyScore(metrics) {
   let score = 0;
-  let factors = 0;
+  let totalWeight = 0;
   
-  // Load balancing rate (0-40 points)
+  // Congestion avoidance (35% weight) - Most critical for network performance
   if (metrics.total_flows > 0) {
-    score += Math.min(40, (metrics.load_balancing_rate || 0) * 0.4);
-    factors++;
+    const congestionScore = Math.min(100, metrics.congestion_avoidance_rate || 0);
+    score += congestionScore * 0.35;
+    totalWeight += 0.35;
   }
   
-  // Congestion avoidance (0-30 points)
+  // Variance improvement (25% weight) - Load distribution quality
+  const varianceScore = Math.min(100, metrics.variance_improvement_percent || 0);
+  score += varianceScore * 0.25;
+  totalWeight += 0.25;
+  
+  // Load balancing utilization (25% weight) - Alternative path usage
   if (metrics.total_flows > 0) {
-    score += Math.min(30, (metrics.congestion_avoidance_rate || 0) * 0.3);
-    factors++;
+    const lbScore = Math.min(100, metrics.load_balancing_rate || 0);
+    score += lbScore * 0.25;
+    totalWeight += 0.25;
   }
   
-  // Variance improvement (0-20 points)
-  score += Math.min(20, (metrics.variance_improvement_percent || 0) * 0.2);
-  factors++;
-  
-  // Path overhead penalty (0 to -10 points)
+  // Path efficiency (15% weight) - Minimize path overhead
   const pathOverhead = metrics.path_overhead_percent || 0;
-  if (pathOverhead > 0) {
-    score -= Math.min(10, pathOverhead * 0.5);
-  }
+  // Convert overhead to efficiency: 0% overhead = 100% efficiency
+  const pathEfficiency = Math.max(0, 100 - Math.min(100, pathOverhead * 2));
+  score += pathEfficiency * 0.15;
+  totalWeight += 0.15;
   
-  // Normalize to percentage
-  return Math.max(0, Math.min(100, score));
+  // Normalize score based on available components
+  const normalizedScore = totalWeight > 0 ? score / totalWeight * 100 : 0;
+  
+  return Math.max(0, Math.min(100, normalizedScore));
 }
 
 // Initialize efficiency tracking when page loads
