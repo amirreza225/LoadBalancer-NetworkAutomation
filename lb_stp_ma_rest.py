@@ -1208,9 +1208,14 @@ class LoadBalancerREST(app_manager.RyuApp):
             if self.flow_paths:
                 baseline_utils = collections.defaultdict(float)
                 
-                # Use fixed traffic estimate per flow to avoid circular logic
-                # This represents typical flow size for fair comparison
-                STANDARD_FLOW_TRAFFIC = 5_000_000  # 5 Mbps per flow for baseline simulation
+                # Use current average utilization for realistic baseline comparison
+                # This represents actual network load distributed via shortest paths
+                total_current_util = sum(link_utils)
+                flows_count = len(self.flow_paths)
+                if flows_count > 0 and total_current_util > 0:
+                    avg_flow_traffic = total_current_util / flows_count
+                else:
+                    avg_flow_traffic = 1_000_000  # 1 Mbps default for low-traffic scenarios
                 
                 for (src, dst), current_path in self.flow_paths.items():
                     if src in self.mac_to_dpid and dst in self.mac_to_dpid:
@@ -1219,11 +1224,11 @@ class LoadBalancerREST(app_manager.RyuApp):
                         baseline_path = self._shortest_path_baseline(s_dpid, d_dpid)
                         
                         if baseline_path and len(baseline_path) > 1:
-                            # Add standard traffic to baseline path links
+                            # Add proportional traffic to baseline path links
                             for i in range(len(baseline_path) - 1):
                                 u, v = baseline_path[i], baseline_path[i + 1]
                                 key = f"{min(u,v)}-{max(u,v)}"
-                                baseline_utils[key] += STANDARD_FLOW_TRAFFIC
+                                baseline_utils[key] += avg_flow_traffic
                 
                 # Calculate baseline variance
                 baseline_util_list = list(baseline_utils.values())

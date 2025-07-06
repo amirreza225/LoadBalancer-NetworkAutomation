@@ -154,39 +154,56 @@ function updateMetric(elementId, value, status = null) {
 
 // Calculate composite efficiency score based on network engineering principles
 function calculateEfficiencyScore(metrics) {
-  let score = 0;
-  let totalWeight = 0;
+  // Cap variance improvement to realistic values to prevent inflated scores
+  const cappedVarianceImprovement = Math.min(75, metrics.variance_improvement_percent || 0);
   
-  // Congestion avoidance (35% weight) - Most critical for network performance
+  // Debug logging to investigate high scores
+  console.log("Efficiency calculation input:", {
+    congestion_avoidance_rate: metrics.congestion_avoidance_rate,
+    variance_improvement_percent: metrics.variance_improvement_percent,
+    capped_variance: cappedVarianceImprovement,
+    load_balancing_rate: metrics.load_balancing_rate,
+    path_overhead_percent: metrics.path_overhead_percent,
+    total_flows: metrics.total_flows
+  });
+  
+  let weightedScore = 0;
+  
+  // Congestion avoidance (35% of total) - Most critical for network performance
   if (metrics.total_flows > 0) {
-    const congestionScore = Math.min(100, metrics.congestion_avoidance_rate || 0);
-    score += congestionScore * 0.35;
-    totalWeight += 0.35;
+    const congestionContribution = (metrics.congestion_avoidance_rate || 0) * 0.35;
+    weightedScore += congestionContribution;
+    console.log("Congestion component:", metrics.congestion_avoidance_rate, "% * 35% =", congestionContribution);
   }
   
-  // Variance improvement (25% weight) - Load distribution quality
-  const varianceScore = Math.min(100, metrics.variance_improvement_percent || 0);
-  score += varianceScore * 0.25;
-  totalWeight += 0.25;
+  // Variance improvement (25% of total) - Load distribution quality (capped at 75%)
+  const varianceContribution = cappedVarianceImprovement * 0.25;
+  weightedScore += varianceContribution;
+  console.log("Variance component:", cappedVarianceImprovement, "% * 25% =", varianceContribution);
   
-  // Load balancing utilization (25% weight) - Alternative path usage
+  // Load balancing utilization (25% of total) - Alternative path usage
   if (metrics.total_flows > 0) {
-    const lbScore = Math.min(100, metrics.load_balancing_rate || 0);
-    score += lbScore * 0.25;
-    totalWeight += 0.25;
+    const lbContribution = (metrics.load_balancing_rate || 0) * 0.25;
+    weightedScore += lbContribution;
+    console.log("Load balancing component:", metrics.load_balancing_rate, "% * 25% =", lbContribution);
   }
   
-  // Path efficiency (15% weight) - Minimize path overhead
+  // Path efficiency (15% of total) - Minimize path overhead
   const pathOverhead = metrics.path_overhead_percent || 0;
-  // Convert overhead to efficiency: 0% overhead = 100% efficiency
-  const pathEfficiency = Math.max(0, 100 - Math.min(100, pathOverhead * 2));
-  score += pathEfficiency * 0.15;
-  totalWeight += 0.15;
+  // Penalty for excessive path overhead: 40% overhead = 60% efficiency
+  const pathEfficiency = Math.max(0, 100 - pathOverhead);
+  const pathContribution = pathEfficiency * 0.15;
+  weightedScore += pathContribution;
+  console.log("Path efficiency:", pathEfficiency, "% * 15% =", pathContribution);
   
-  // Normalize score based on available components
-  const normalizedScore = totalWeight > 0 ? score / totalWeight * 100 : 0;
+  console.log("Total weighted score:", weightedScore);
   
-  return Math.max(0, Math.min(100, normalizedScore));
+  // No additional normalization needed - score is already percentage-based
+  const finalScore = Math.max(0, Math.min(100, weightedScore));
+  
+  console.log("Final efficiency score:", finalScore);
+  
+  return finalScore;
 }
 
 // Initialize efficiency tracking when page loads
