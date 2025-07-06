@@ -45,110 +45,9 @@ build_image() {
     print_success "Docker image built successfully!"
 }
 
-# Function to run the container
+# Function to run container (only minimal mode available)
 run_container() {
-    local topology=${1:-hexring}
-    local switches=${2:-4}
-    local threshold=${3:-25}
-    local mode=${4:-adaptive}
-    
     print_info "Starting SDN Load Balancer container..."
-    print_info "Configuration:"
-    print_info "  Topology: $topology"
-    print_info "  Switches: $switches"
-    print_info "  Threshold: $threshold Mbps"
-    print_info "  Mode: $mode"
-    
-    # Stop existing container if running
-    docker stop sdn-lb 2>/dev/null || true
-    docker rm sdn-lb 2>/dev/null || true
-    
-    # Create logs and data directories
-    mkdir -p logs data
-    
-    # Run the container
-    docker run -d \
-        --name sdn-lb \
-        --privileged \
-        -v "$(pwd)/logs:/app/logs" \
-        -v "$(pwd)/data:/app/data" \
-        -v "/lib/modules:/lib/modules:ro" \
-        -e TOPOLOGY="$topology" \
-        -e SWITCHES="$switches" \
-        -e THRESHOLD="$threshold" \
-        -e MODE="$mode" \
-        -p 8000:8000 \
-        -p 8080:8080 \
-        -p 6653:6653 \
-        sdn-load-balancer:latest
-    
-    # Wait for container to start
-    sleep 5
-    
-    if docker ps | grep -q sdn-lb; then
-        print_success "SDN Load Balancer started successfully!"
-        print_info "Access points:"
-        print_info "  Web Dashboard: http://localhost:8000"
-        print_info "  REST API: http://localhost:8080"
-        print_info "  OpenFlow Controller: localhost:6653"
-    else
-        print_error "Failed to start SDN Load Balancer container"
-        print_info "Checking logs..."
-        docker logs sdn-lb
-        exit 1
-    fi
-}
-
-# Function to run container in manual mode
-run_manual_container() {
-    print_info "Starting SDN Load Balancer container in MANUAL mode..."
-    print_info "Only controller and web dashboard will start automatically."
-    print_info "You will start topologies manually."
-    
-    # Stop existing container if running
-    docker stop sdn-lb 2>/dev/null || true
-    docker rm sdn-lb 2>/dev/null || true
-    
-    # Create logs and data directories
-    mkdir -p logs data
-    
-    # Run the container with manual startup script
-    docker run -d \
-        --name sdn-lb \
-        --privileged \
-        -v "$(pwd)/logs:/app/logs" \
-        -v "$(pwd)/data:/app/data" \
-        -v "/lib/modules:/lib/modules:ro" \
-        -p 8000:8000 \
-        -p 8080:8080 \
-        -p 6653:6653 \
-        sdn-load-balancer:latest /app/start_manual.sh
-    
-    # Wait for container to start
-    sleep 5
-    
-    if docker ps | grep -q sdn-lb; then
-        print_success "SDN Load Balancer started in MANUAL mode!"
-        print_info "Access points:"
-        print_info "  Web Dashboard: http://localhost:8000"
-        print_info "  REST API: http://localhost:8080"
-        print_info "  OpenFlow Controller: localhost:6653"
-        print_info ""
-        print_info "To start topologies manually:"
-        print_info "  docker exec -it sdn-lb python3 hexring_topo_mn.py    # Exact hexring"
-        print_info "  docker exec -it sdn-lb mn --topo linear,4 --controller remote,ip=127.0.0.1,port=6653 --switch ovsk --mac"
-        print_info "  docker exec -it sdn-lb /bin/bash    # Enter container shell"
-    else
-        print_error "Failed to start SDN Load Balancer container"
-        print_info "Checking logs..."
-        docker logs sdn-lb
-        exit 1
-    fi
-}
-
-# Function to run container in minimal mode (no auto services)
-run_minimal_container() {
-    print_info "Starting SDN Load Balancer container in MINIMAL mode..."
     print_info "NO services will start automatically."
     print_info "Complete manual control over all components."
     
@@ -169,23 +68,23 @@ run_minimal_container() {
         -p 8000:8000 \
         -p 8080:8080 \
         -p 6653:6653 \
-        sdn-load-balancer:latest /app/start_minimal.sh
+        sdn-load-balancer:latest
     
     # Wait for container to start
     sleep 3
     
-    # Check if container exists (it may not show in ps due to interactive mode)
+    # Check if container exists
     if docker container inspect sdn-lb >/dev/null 2>&1; then
-        print_success "SDN Load Balancer started in MINIMAL mode!"
+        print_success "SDN Load Balancer started!"
         print_info "Container is ready with NO auto-started services."
         print_info ""
         print_info "Manual startup commands:"
-        print_info "  docker exec -it sdn-lb ryu-manager --observe-links lb_stp_ma_rest.py"
-        print_info "  docker exec -it sdn-lb bash -c 'cd web && python3 -m http.server 8000'"
-        print_info "  docker exec -it sdn-lb sudo python3 hexring_topo.py"
-        print_info "  docker exec -it sdn-lb /bin/bash    # Enter container shell"
+        print_info "  ./docker-run.sh shell    # Enter container shell"
+        print_info "  Then run: ryu-manager --observe-links --ofp-tcp-listen-port 6653 --wsapi-port 8080 --wsapi-host 0.0.0.0 lb_stp_ma_rest.py"
+        print_info "  Then run: cd web && python3 -m http.server 8000"
+        print_info "  Then run: sudo python3 hexring_topo.py"
         print_info ""
-        print_info "Container is running in interactive mode. Use 'docker exec' commands above."
+        print_info "Container is running. Use './docker-run.sh shell' to enter."
     else
         print_error "Failed to start SDN Load Balancer container"
         print_info "Checking logs..."
@@ -214,11 +113,6 @@ enter_container() {
     docker exec -it sdn-lb /bin/bash
 }
 
-# Function to run tests
-run_tests() {
-    print_info "Running SDN Load Balancer tests..."
-    docker exec sdn-lb /app/test.sh
-}
 
 # Function to show status
 show_status() {
@@ -249,37 +143,26 @@ show_status() {
 
 # Function to show help
 show_help() {
-    echo "Usage: $0 [COMMAND] [OPTIONS]"
+    echo "Usage: $0 [COMMAND]"
     echo ""
     echo "Commands:"
     echo "  build                          Build Docker image"
-    echo "  run [topology] [switches] [threshold] [mode]"
-    echo "                                 Run container with configuration"
-    echo "  run-manual                     Run container with manual topology control"
-    echo "  run-minimal                    Run container with NO auto-started services"
+    echo "  run                            Run container (minimal mode - no auto services)"
     echo "  stop                           Stop and remove container"
     echo "  logs                           Show container logs"
     echo "  shell                          Enter container shell"
-    echo "  test                           Run tests"
     echo "  status                         Show container status"
     echo "  help                           Show this help message"
     echo ""
-    echo "Default configuration:"
-    echo "  topology: hexring"
-    echo "  switches: 4"
-    echo "  threshold: 25 (Mbps)"
-    echo "  mode: adaptive"
-    echo ""
-    echo "Available topologies: hexring, linear, ring, tree, mesh"
-    echo "Available modes: adaptive, least_loaded, weighted_ecmp, round_robin,"
-    echo "                 latency_aware, qos_aware, flow_aware"
+    echo "Manual startup commands (after running container):"
+    echo "  ./docker-run.sh shell                    # Enter container shell"
+    echo "  Then run: ryu-manager --observe-links --ofp-tcp-listen-port 6653 --wsapi-port 8080 --wsapi-host 0.0.0.0 lb_stp_ma_rest.py"
+    echo "  Then run: cd web && python3 -m http.server 8000"
+    echo "  Then run: sudo python3 hexring_topo.py"
     echo ""
     echo "Examples:"
     echo "  $0 build"
     echo "  $0 run"
-    echo "  $0 run linear 5 50 least_loaded"
-    echo "  $0 run-manual                    # Controller + web dashboard auto-start"
-    echo "  $0 run-minimal                   # Nothing auto-starts"
     echo "  $0 status"
     echo "  $0 logs"
 }
@@ -293,15 +176,7 @@ case "${1:-help}" in
         ;;
     run)
         build_image
-        run_container "$2" "$3" "$4" "$5"
-        ;;
-    run-manual)
-        build_image
-        run_manual_container
-        ;;
-    run-minimal)
-        build_image
-        run_minimal_container
+        run_container
         ;;
     stop)
         stop_container
@@ -311,9 +186,6 @@ case "${1:-help}" in
         ;;
     shell)
         enter_container
-        ;;
-    test)
-        run_tests
         ;;
     status)
         show_status

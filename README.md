@@ -113,20 +113,26 @@ LoadBalancer-NetworkAutomation/
 
 ## ⚙️ Requirements
 
-- Python 3.x
-- Mininet
-- Ryu controller (OpenFlow 1.3 support)
+- Docker (recommended) or manual installation
 - Web browser (for frontend)
-- `iperf` (for traffic testing)
 
-**Recommended**: Use Mininet VM with port forwarding (8000, 8080, 22)
+### Docker Installation (Recommended)
 
-### Installation
+```bash
+# Clone repository
+git clone <repository-url>
+cd LoadBalancer-NetworkAutomation
+
+# Build and run with Docker (simplest method)
+./docker-run.sh run
+```
+
+### Manual Installation
 
 ```bash
 # Install dependencies
-sudo apt install mininet
-pip install ryu
+sudo apt install mininet python3 python3-pip
+pip3 install ryu==4.34 eventlet==0.30.2
 
 # Clone repository
 git clone <repository-url>
@@ -137,7 +143,29 @@ cd LoadBalancer-NetworkAutomation
 
 ## 🚀 Running the Project
 
-### **Option 1: Original Hexring Topology**
+### **Docker Method (Recommended)**
+
+```bash
+# Start the container
+./docker-run.sh run
+
+# Enter container shell
+./docker-run.sh shell
+
+# Inside container - start components manually:
+# 1. Start enhanced controller
+ryu-manager --observe-links --ofp-tcp-listen-port 6653 --wsapi-port 8080 --wsapi-host 0.0.0.0 lb_stp_ma_rest.py
+
+# 2. Launch web dashboard (in new terminal)
+./docker-run.sh shell
+cd web && python3 -m http.server 8000
+
+# 3. Start topology (in new terminal)
+./docker-run.sh shell
+sudo python3 hexring_topo.py
+```
+
+### **Manual Method**
 
 ```bash
 # Terminal 1: Start hexring topology
@@ -148,19 +176,17 @@ ryu-manager --observe-links lb_stp_ma_rest.py
 
 # Terminal 3: Launch web dashboard
 cd web/
-sudo python3 -m http.server 8000
+python3 -m http.server 8000
 ```
 
-### **Option 2: Generic Topologies**
+### **Alternative Topologies**
 
 ```bash
-# Terminal 1: Choose your topology
+# Inside container or manual setup
 sudo python3 generic_topo.py --topology linear --switches 4
 sudo python3 generic_topo.py --topology ring --switches 5
 sudo python3 generic_topo.py --topology tree --switches 7
 sudo python3 generic_topo.py --topology mesh --switches 4
-
-# Terminal 2 & 3: Same as above
 ```
 
 ### **Testing Traffic**
@@ -176,9 +202,24 @@ mininet> h1 iperf -c 192.168.8.41 -u -b 1000M -t 15
 # Generate traffic (generic topologies)
 mininet> h2 iperf -s &
 mininet> h1 iperf -c 192.168.1.12 -u -b 1000M -t 15
+
+# Clean up network state
+mininet> exit
+sudo mn -c
 ```
 
 Access dashboard: **http://localhost:8000**
+
+### **Docker Commands Reference**
+
+```bash
+./docker-run.sh run       # Start container
+./docker-run.sh shell     # Enter container
+./docker-run.sh stop      # Stop container
+./docker-run.sh logs      # View logs
+./docker-run.sh status    # Check status
+./docker-run.sh help      # Show help
+```
 
 ---
 
