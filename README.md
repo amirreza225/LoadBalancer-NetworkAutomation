@@ -184,17 +184,17 @@ Access dashboard: **http://localhost:8000**
 
 ## 🌐 Enhanced REST API
 
-| Endpoint                    | Description                              |
-| --------------------------- | ---------------------------------------- |
-| `/topology`                 | Dynamic network topology (nodes & links) |
-| `/load/links`               | Real-time link utilization data          |
-| `/load/path`                | Active flow paths with host names        |
+| Endpoint                    | Description                                                  |
+| --------------------------- | ------------------------------------------------------------ |
+| `/topology`                 | Dynamic network topology (nodes & links)                     |
+| `/load/links`               | Real-time link utilization data                              |
+| `/load/path`                | Active flow paths with host names                            |
 | `/stats/efficiency`         | Comprehensive efficiency metrics with corrected calculations |
-| `/stats/algorithm`          | Current algorithm mode and advanced statistics |
-| `/config/threshold`         | Congestion threshold configuration (GET/POST) |
-| `/config/mode`              | Load balancing mode switching (7 modes available) |
-| `/debug/metrics`            | Debug information for flow analysis      |
-| `/load/ports/{dpid}/{port}` | Historical port statistics               |
+| `/stats/algorithm`          | Current algorithm mode and advanced statistics               |
+| `/config/threshold`         | Congestion threshold configuration (GET/POST)                |
+| `/config/mode`              | Load balancing mode switching (7 modes available)            |
+| `/debug/metrics`            | Debug information for flow analysis                          |
+| `/load/ports/{dpid}/{port}` | Historical port statistics                                   |
 
 ### **Example API Usage**
 
@@ -313,7 +313,7 @@ Compared to traditional shortest-path routing, this enterprise-grade load balanc
 ## 🧩 Future Enhancements
 
 - **Deep Learning Integration** - Neural network-based traffic prediction models
-- **Multi-Controller Architecture** - Distributed SDN controller coordination  
+- **Multi-Controller Architecture** - Distributed SDN controller coordination
 - **Advanced ML Models** - Reinforcement learning for adaptive threshold tuning
 - **Intent-based Networking** - High-level policy specification and automated management
 - **Network Digital Twin** - Advanced simulation and predictive modeling
@@ -366,4 +366,3 @@ GitHub: [@rghaf](https://github.com/rghaf)
 - ✅ **Universal topology support** - works with any OpenFlow network structure
 - ✅ **Enterprise-grade algorithms** - production-ready traffic engineering capabilities
 - ✅ **Real-time analytics dashboard** - comprehensive performance monitoring and visualization
-- ✅ **Academic validation** - published research with peer-reviewed methodologies
