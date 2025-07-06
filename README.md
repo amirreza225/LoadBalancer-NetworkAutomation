@@ -152,18 +152,25 @@ cd LoadBalancer-NetworkAutomation
 # Enter container shell
 ./docker-run.sh shell
 
-# Inside container - start components manually:
-# 1. Start enhanced controller
+# Inside container - start components in CORRECT ORDER:
+# 1. Start topology FIRST (in first terminal)
+sudo python3 hexring_topo.py
+
+# 2. Start enhanced controller (in new terminal)
+./docker-run.sh shell
 ryu-manager --observe-links --ofp-tcp-listen-port 6653 --wsapi-port 8080 --wsapi-host 0.0.0.0 lb_stp_ma_rest.py
 
-# 2. Launch web dashboard (in new terminal)
+# 3. Launch web dashboard (in new terminal)
 ./docker-run.sh shell
 cd web && python3 -m http.server 8000
-
-# 3. Start topology (in new terminal)
-./docker-run.sh shell
-sudo python3 hexring_topo.py
 ```
+
+**⚠️ IMPORTANT STARTUP ORDER:**
+1. **Topology FIRST** - Ensures proper host discovery (h1-h6 with correct MACs)
+2. **Controller SECOND** - Discovers the established topology correctly  
+3. **Web Dashboard THIRD** - Visualizes the correct discovered topology
+
+If you start controller first, use the **"Cleanup Hosts"** button in the web interface to reset host discovery.
 
 ### **Manual Method**
 

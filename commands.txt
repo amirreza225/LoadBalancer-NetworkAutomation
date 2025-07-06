@@ -110,7 +110,6 @@ h1 iperf -c 192.168.1.12 -u -b 100M -t 30
 -high load test generic-
 h2 iperf -s &
 h5 iperf -c 192.168.1.12 -u -b 200M -t 60
-h5 iperf -c 192.168.8.41 -u -b 200M -t 60
 
 -multi-flow test generic-
 h2 iperf -s -p 5001 &
