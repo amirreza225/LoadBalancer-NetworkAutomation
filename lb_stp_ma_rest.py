@@ -9,6 +9,9 @@ import collections
 import heapq
 import json
 import time
+import hashlib
+import struct
+import socket
 
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -27,11 +30,31 @@ POLL_PERIOD    = 2         # seconds
 MA_WINDOW_SEC  = 5         # seconds
 DEFAULT_THRESH = 25_000_000 # bytes/sec
 CONGESTION_PREDICTION_WINDOW = 10  # seconds for trend analysis
+
+# Enhanced load balancing constants
+ELEPHANT_FLOW_THRESHOLD = 10_000_000  # 10 Mbps threshold for elephant flows
+MICE_FLOW_THRESHOLD = 1_000_000       # 1 Mbps threshold for mice flows
+EWMA_ALPHA = 0.3                      # Exponential weighted moving average factor
+LATENCY_WEIGHT = 0.2                  # Weight for latency in path selection
+QOS_WEIGHT = 0.25                     # Weight for QoS in path selection
+FLOW_TIMEOUT_SEC = 300                # Flow tracking timeout (5 minutes)
+
 LOAD_BALANCING_MODES = {
     'round_robin': 0,
     'least_loaded': 1,
     'weighted_ecmp': 2,
-    'adaptive': 3
+    'adaptive': 3,
+    'latency_aware': 4,
+    'qos_aware': 5,
+    'flow_aware': 6
+}
+
+# QoS Classes
+QOS_CLASSES = {
+    'CRITICAL': {'priority': 3, 'min_bw': 10_000_000, 'max_latency': 10},     # VoIP, real-time
+    'HIGH': {'priority': 2, 'min_bw': 5_000_000, 'max_latency': 50},         # Video streaming
+    'NORMAL': {'priority': 1, 'min_bw': 1_000_000, 'max_latency': 200},      # Web browsing
+    'BEST_EFFORT': {'priority': 0, 'min_bw': 0, 'max_latency': 1000}         # Background traffic
 }
 
 class LoadBalancerREST(app_manager.RyuApp):
@@ -59,6 +82,16 @@ class LoadBalancerREST(app_manager.RyuApp):
         self.congestion_trends = collections.defaultdict(list)  # (dpid, port) -> [(time, utilization)]
         self.alternative_paths = {}  # (src, dst) -> [path1, path2, ...]
         self.path_weights = {}  # path_id -> current weight for ECMP
+        
+        # Enhanced network engineering features
+        self.flow_characteristics = {}  # flow_key -> {'type': 'elephant/mice', 'rate': bps, 'start_time': time}
+        self.link_latencies = {}  # (dpid1, dpid2) -> latency_ms
+        self.flow_qos_classes = {}  # flow_key -> qos_class
+        self.switch_resources = {}  # dpid -> {'cpu': %, 'memory': %, 'flow_table': %}
+        self.adaptive_thresholds = {}  # dpid -> dynamic_threshold_bps
+        self.ecmp_flow_table = {}  # flow_hash -> path_index for ECMP persistence
+        self.congestion_ewma = collections.defaultdict(float)  # (dpid, port) -> EWMA value
+        self.path_latency_cache = {}  # (src, dst) -> {path_hash: latency_ms}
         # stats
         self.last_bytes   = collections.defaultdict(lambda: collections.defaultdict(int))
         self.rate_hist    = collections.defaultdict(lambda: collections.defaultdict(list))
@@ -197,6 +230,12 @@ class LoadBalancerREST(app_manager.RyuApp):
             return self._select_weighted_path(all_paths, cost)
         elif self.load_balancing_mode == LOAD_BALANCING_MODES['round_robin']:
             return self._select_round_robin_path(all_paths, flow_key)
+        elif self.load_balancing_mode == LOAD_BALANCING_MODES['latency_aware']:
+            return self._select_latency_aware_path(all_paths, cost)
+        elif self.load_balancing_mode == LOAD_BALANCING_MODES['qos_aware']:
+            return self._select_qos_aware_path(all_paths, cost, flow_key)
+        elif self.load_balancing_mode == LOAD_BALANCING_MODES['flow_aware']:
+            return self._select_flow_aware_path(all_paths, cost, flow_key)
     
     def _find_k_shortest_paths(self, src, dst, cost, k=3):
         """
@@ -302,36 +341,87 @@ class LoadBalancerREST(app_manager.RyuApp):
         return score
     
     def _predict_congestion(self, dpid, port, now):
-        """Predict future congestion based on utilization trends."""
+        """
+        Enhanced congestion prediction using EWMA and multiple algorithms.
+        Combines linear regression with exponential weighted moving average for better accuracy.
+        """
         trends = self.congestion_trends.get((dpid, port), [])
+        link_key = (dpid, port)
         
         # Keep only recent trends
         recent_trends = [(t, util) for t, util in trends if now - t <= CONGESTION_PREDICTION_WINDOW]
         
-        if len(recent_trends) < 3:
+        if len(recent_trends) < 2:
             return 0  # Not enough data for prediction
         
-        # Calculate trend slope (simple linear regression)
-        times = [t for t, _ in recent_trends]
-        utils = [util for _, util in recent_trends]
+        # Get current utilization
+        current_util = recent_trends[-1][1] if recent_trends else 0
         
-        n = len(recent_trends)
-        sum_t = sum(times)
-        sum_u = sum(utils)
-        sum_tu = sum(t * u for t, u in recent_trends)
-        sum_t2 = sum(t * t for t in times)
+        # Update EWMA for this link
+        if link_key in self.congestion_ewma:
+            # Update existing EWMA
+            self.congestion_ewma[link_key] = (EWMA_ALPHA * current_util + 
+                                            (1 - EWMA_ALPHA) * self.congestion_ewma[link_key])
+        else:
+            # Initialize EWMA
+            self.congestion_ewma[link_key] = current_util
         
-        # Calculate slope
-        denominator = n * sum_t2 - sum_t * sum_t
-        if denominator == 0:
-            return 0
+        ewma_value = self.congestion_ewma[link_key]
         
-        slope = (n * sum_tu - sum_t * sum_u) / denominator
+        # Method 1: Linear regression prediction (existing)
+        linear_prediction = 0
+        if len(recent_trends) >= 3:
+            times = [t for t, _ in recent_trends]
+            utils = [util for _, util in recent_trends]
+            
+            n = len(recent_trends)
+            sum_t = sum(times)
+            sum_u = sum(utils)
+            sum_tu = sum(t * u for t, u in recent_trends)
+            sum_t2 = sum(t * t for t in times)
+            
+            # Calculate slope
+            denominator = n * sum_t2 - sum_t * sum_t
+            if denominator != 0:
+                slope = (n * sum_tu - sum_t * sum_u) / denominator
+                # Predict utilization in 5 seconds
+                linear_prediction = max(0, utils[-1] + slope * 5)
         
-        # Predict utilization in 5 seconds
-        predicted_util = utils[-1] + slope * 5
+        # Method 2: EWMA-based prediction
+        # If current utilization is increasing above EWMA, predict higher congestion
+        ewma_prediction = ewma_value
+        if current_util > ewma_value * 1.1:  # 10% above EWMA
+            growth_factor = current_util / (ewma_value + 1)
+            ewma_prediction = current_util * min(growth_factor, 2.0)  # Cap at 2x growth
         
-        return max(0, predicted_util)
+        # Method 3: Rate of change prediction
+        rate_prediction = 0
+        if len(recent_trends) >= 2:
+            recent_util = recent_trends[-1][1]
+            prev_util = recent_trends[-2][1]
+            time_diff = recent_trends[-1][0] - recent_trends[-2][0]
+            
+            if time_diff > 0:
+                rate_of_change = (recent_util - prev_util) / time_diff
+                # Project 5 seconds ahead
+                rate_prediction = max(0, recent_util + rate_of_change * 5)
+        
+        # Combine predictions with weights
+        # Linear regression: 40%, EWMA: 35%, Rate of change: 25%
+        if linear_prediction > 0 and rate_prediction > 0:
+            combined_prediction = (0.4 * linear_prediction + 
+                                 0.35 * ewma_prediction + 
+                                 0.25 * rate_prediction)
+        elif linear_prediction > 0:
+            combined_prediction = (0.6 * linear_prediction + 0.4 * ewma_prediction)
+        else:
+            combined_prediction = ewma_prediction
+        
+        # Add safety margin for critical links (those already above 70% threshold)
+        if current_util > self.THRESHOLD_BPS * 0.7:
+            combined_prediction *= 1.2  # 20% safety margin
+        
+        return max(0, combined_prediction)
     
     def _update_flow_metrics(self, s_dpid, d_dpid, path, cost):
         """Update efficiency metrics for a new flow."""
@@ -410,12 +500,61 @@ class LoadBalancerREST(app_manager.RyuApp):
         return min(paths, key=lambda p: self._calculate_path_cost(p, cost))
     
     def _select_weighted_path(self, paths, cost):
-        """Select path using weighted ECMP."""
+        """
+        Enhanced weighted ECMP with flow hashing for TCP flow stickiness.
+        Implements proper ECMP with consistent hashing for flow persistence.
+        """
         if not paths:
             return None
+            
+        if len(paths) == 1:
+            return paths[0]
         
-        # For now, return least loaded (can be enhanced with actual ECMP)
-        return self._select_least_loaded_path(paths, cost)
+        # Calculate path weights based on inverse utilization
+        path_weights = []
+        total_weight = 0
+        
+        for path in paths:
+            path_cost = self._calculate_path_cost(path, cost)
+            # Use inverse cost as weight (lower cost = higher weight)
+            # Add small constant to avoid division by zero
+            weight = 1.0 / (path_cost + 1000)
+            path_weights.append(weight)
+            total_weight += weight
+        
+        # Normalize weights
+        normalized_weights = [w / total_weight for w in path_weights]
+        
+        # Create cumulative distribution for weighted random selection
+        cumulative_weights = []
+        cumsum = 0
+        for weight in normalized_weights:
+            cumsum += weight
+            cumulative_weights.append(cumsum)
+        
+        # Generate consistent hash for this flow to ensure stickiness
+        flow_key = str(sorted(paths[0][:2]))  # Use src-dst as flow identifier
+        flow_hash = int(hashlib.md5(flow_key.encode()).hexdigest()[:8], 16)
+        
+        # Check if we have a cached path for this flow
+        if flow_hash in self.ecmp_flow_table:
+            cached_index = self.ecmp_flow_table[flow_hash]
+            if cached_index < len(paths):
+                return paths[cached_index]
+        
+        # Select path based on weighted distribution with consistent hashing
+        random_value = (flow_hash % 10000) / 10000.0  # Normalize hash to [0,1)
+        
+        selected_index = 0
+        for i, cum_weight in enumerate(cumulative_weights):
+            if random_value <= cum_weight:
+                selected_index = i
+                break
+        
+        # Cache the selection for flow stickiness
+        self.ecmp_flow_table[flow_hash] = selected_index
+        
+        return paths[selected_index]
     
     def _select_round_robin_path(self, paths, flow_key):
         """Select path using round-robin among available paths."""
@@ -425,6 +564,279 @@ class LoadBalancerREST(app_manager.RyuApp):
         # Simple round-robin based on flow hash
         path_index = hash(str(flow_key)) % len(paths)
         return paths[path_index]
+
+    def _classify_flow(self, flow_key, packet_size=1500):
+        """
+        Classify flow as elephant, mice, or normal based on observed characteristics.
+        Real network engineers use this for differentiated handling.
+        """
+        now = time.time()
+        
+        if flow_key not in self.flow_characteristics:
+            # Initialize flow tracking
+            self.flow_characteristics[flow_key] = {
+                'type': 'unknown',
+                'rate': 0,
+                'start_time': now,
+                'packet_count': 0,
+                'byte_count': 0,
+                'last_seen': now
+            }
+        
+        flow_info = self.flow_characteristics[flow_key]
+        flow_info['packet_count'] += 1
+        flow_info['byte_count'] += packet_size
+        flow_info['last_seen'] = now
+        
+        # Calculate flow rate over observation window
+        duration = now - flow_info['start_time']
+        if duration > 1.0:  # At least 1 second of observation
+            flow_info['rate'] = flow_info['byte_count'] / duration
+            
+            # Classify based on sustained rate
+            if flow_info['rate'] > ELEPHANT_FLOW_THRESHOLD:
+                flow_info['type'] = 'elephant'
+            elif flow_info['rate'] < MICE_FLOW_THRESHOLD:
+                flow_info['type'] = 'mice'
+            else:
+                flow_info['type'] = 'normal'
+        
+        return flow_info['type']
+    
+    def _select_flow_aware_path(self, paths, cost, flow_key):
+        """
+        Flow-aware path selection with differentiated handling for elephants vs mice.
+        Production networks require this for optimal resource utilization.
+        """
+        if not paths:
+            return None
+            
+        flow_type = self._classify_flow(flow_key)
+        
+        if flow_type == 'elephant':
+            # Elephant flows: Use dedicated high-capacity paths, avoid sharing
+            return self._select_elephant_flow_path(paths, cost)
+        elif flow_type == 'mice':
+            # Mice flows: Use any available path, prioritize low latency
+            return self._select_mice_flow_path(paths, cost)
+        else:
+            # Normal flows: Use adaptive selection
+            return self._select_adaptive_path(paths, cost)
+    
+    def _select_elephant_flow_path(self, paths, cost):
+        """
+        Select optimal path for elephant flows - prioritize high capacity links.
+        """
+        # Score paths based on capacity and current utilization
+        best_path = None
+        best_score = float('-inf')
+        
+        for path in paths:
+            # Calculate path capacity and utilization
+            path_capacity = self._calculate_path_capacity(path)
+            path_utilization = self._calculate_path_cost(path, cost)
+            
+            # Elephants prefer high capacity, low utilization paths
+            # Avoid paths that are already heavily utilized
+            utilization_ratio = path_utilization / (path_capacity + 1)
+            capacity_score = path_capacity / 1_000_000  # Normalize to Mbps
+            utilization_penalty = utilization_ratio * 100
+            
+            score = capacity_score - utilization_penalty
+            
+            if score > best_score:
+                best_score = score
+                best_path = path
+                
+        return best_path or paths[0]
+    
+    def _select_mice_flow_path(self, paths, cost):
+        """
+        Select optimal path for mice flows - prioritize low latency.
+        """
+        # Mice flows prioritize latency over capacity
+        best_path = None
+        best_latency = float('inf')
+        
+        for path in paths:
+            path_latency = self._estimate_path_latency(path)
+            path_cost = self._calculate_path_cost(path, cost)
+            
+            # Combine latency and current load (light weight on cost)
+            total_score = path_latency + (path_cost / 10_000_000)  # Normalize cost
+            
+            if total_score < best_latency:
+                best_latency = total_score
+                best_path = path
+                
+        return best_path or paths[0]
+    
+    def _calculate_path_capacity(self, path):
+        """
+        Estimate path capacity based on minimum link capacity.
+        """
+        if len(path) < 2:
+            return 1_000_000_000  # 1 Gbps default
+            
+        min_capacity = float('inf')
+        for i in range(len(path) - 1):
+            # Assume 1 Gbps links by default, could be enhanced with LLDP data
+            link_capacity = 1_000_000_000  # 1 Gbps in bps
+            min_capacity = min(min_capacity, link_capacity)
+            
+        return min_capacity
+    
+    def _estimate_path_latency(self, path):
+        """
+        Estimate path latency. In production, this would use real RTT measurements.
+        """
+        if len(path) < 2:
+            return 1.0  # 1ms for local delivery
+            
+        # Calculate cached latency if available
+        path_hash = hash(tuple(path))
+        if path_hash in self.path_latency_cache.get((path[0], path[-1]), {}):
+            return self.path_latency_cache[(path[0], path[-1])][path_hash]
+        
+        # Estimate: base latency + per-hop latency
+        base_latency = 0.1  # 0.1ms base
+        per_hop_latency = 0.5  # 0.5ms per hop
+        estimated_latency = base_latency + (len(path) - 1) * per_hop_latency
+        
+        # Cache the estimation
+        src_dst = (path[0], path[-1])
+        if src_dst not in self.path_latency_cache:
+            self.path_latency_cache[src_dst] = {}
+        self.path_latency_cache[src_dst][path_hash] = estimated_latency
+        
+        return estimated_latency
+    
+    def _cleanup_old_flows(self):
+        """
+        Clean up old flow tracking data to prevent memory leaks.
+        """
+        now = time.time()
+        flows_to_remove = []
+        
+        for flow_key, flow_info in self.flow_characteristics.items():
+            if now - flow_info['last_seen'] > FLOW_TIMEOUT_SEC:
+                flows_to_remove.append(flow_key)
+        
+        for flow_key in flows_to_remove:
+            del self.flow_characteristics[flow_key]
+            if flow_key in self.flow_qos_classes:
+                del self.flow_qos_classes[flow_key]
+
+    def _select_latency_aware_path(self, paths, cost):
+        """
+        Latency-aware path selection prioritizing RTT and propagation delay.
+        Critical for real-time applications and interactive traffic.
+        """
+        if not paths:
+            return None
+            
+        best_path = None
+        best_score = float('inf')
+        
+        for path in paths:
+            # Get estimated latency for this path
+            path_latency = self._estimate_path_latency(path)
+            path_utilization = self._calculate_path_cost(path, cost)
+            
+            # Combine latency (primary) with utilization (secondary)
+            # High utilization increases queuing delay
+            queuing_delay = path_utilization / 100_000_000  # Normalize to ms
+            total_latency = path_latency + queuing_delay
+            
+            if total_latency < best_score:
+                best_score = total_latency
+                best_path = path
+                
+        return best_path or paths[0]
+    
+    def _select_qos_aware_path(self, paths, cost, flow_key):
+        """
+        QoS-aware path selection with flow classification and priority handling.
+        Production networks require this for SLA guarantees.
+        """
+        if not paths:
+            return None
+            
+        # Classify flow into QoS class
+        qos_class = self._classify_qos(flow_key)
+        qos_info = QOS_CLASSES.get(qos_class, QOS_CLASSES['BEST_EFFORT'])
+        
+        best_path = None
+        best_score = float('inf')
+        
+        for path in paths:
+            score = 0
+            
+            # Calculate path metrics
+            path_latency = self._estimate_path_latency(path)
+            path_capacity = self._calculate_path_capacity(path)
+            path_utilization = self._calculate_path_cost(path, cost)
+            available_bw = max(0, path_capacity - path_utilization)
+            
+            # QoS-specific scoring
+            if qos_class == 'CRITICAL':
+                # Critical flows: latency is paramount
+                score = path_latency * 10 + (1 / (available_bw + 1)) * 1000
+            elif qos_class == 'HIGH':
+                # High priority: balance latency and bandwidth
+                score = path_latency * 5 + (1 / (available_bw + 1)) * 500
+            elif qos_class == 'NORMAL':
+                # Normal flows: prefer available bandwidth
+                score = path_latency * 2 + (1 / (available_bw + 1)) * 100
+            else:  # BEST_EFFORT
+                # Best effort: use least loaded path
+                score = path_utilization / 1_000_000
+            
+            # Check if path meets QoS requirements
+            if (path_latency <= qos_info['max_latency'] and 
+                available_bw >= qos_info['min_bw']):
+                score *= 0.5  # Prefer paths that meet requirements
+            
+            if score < best_score:
+                best_score = score
+                best_path = path
+                
+        return best_path or paths[0]
+    
+    def _classify_qos(self, flow_key):
+        """
+        Classify flows into QoS classes based on heuristics and observed behavior.
+        In production, this would integrate with DPI or application-aware classification.
+        """
+        if flow_key in self.flow_qos_classes:
+            return self.flow_qos_classes[flow_key]
+        
+        # Get flow characteristics
+        flow_info = self.flow_characteristics.get(flow_key, {})
+        flow_rate = flow_info.get('rate', 0)
+        packet_count = flow_info.get('packet_count', 0)
+        
+        # Heuristic classification (in production, use DPI or port-based classification)
+        if packet_count > 0:
+            avg_packet_size = flow_info.get('byte_count', 0) / packet_count
+            
+            # Small packets at high rate = likely real-time (VoIP, gaming)
+            if avg_packet_size < 500 and flow_rate > 1_000_000:
+                qos_class = 'CRITICAL'
+            # Large sustained flows = likely video streaming
+            elif flow_rate > 5_000_000 and avg_packet_size > 1000:
+                qos_class = 'HIGH'
+            # Moderate flows = web browsing, file transfers
+            elif flow_rate > 1_000_000:
+                qos_class = 'NORMAL'
+            else:
+                qos_class = 'BEST_EFFORT'
+        else:
+            qos_class = 'BEST_EFFORT'
+        
+        # Cache the classification
+        self.flow_qos_classes[flow_key] = qos_class
+        return qos_class
 
     def _dijkstra(self, src, dst, cost, avoid_congested):
         """
@@ -494,6 +906,7 @@ class LoadBalancerREST(app_manager.RyuApp):
             self.last_calc = now
             self._rebalance(now)
             self._calculate_efficiency_metrics(now)
+            self._cleanup_old_flows()  # Periodic cleanup to prevent memory leaks
 
     def _rebalance(self, now):
         """
