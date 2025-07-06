@@ -89,9 +89,9 @@ h1 iperf -c 192.168.1.11 -u -b 1000M -t 60
 h2 iperf -s -p 5001 &
 h3 iperf -s -p 5002 &
 h4 iperf -s -p 5003 &
-h1 iperf -c 192.168.1.12 -u -p 5001 -b 200M -t 120 &
-h5 iperf -c 192.168.1.13 -u -p 5002 -b 200M -t 120 &
-h6 iperf -c 192.168.1.14 -u -p 5003 -b 200M -t 120
+h1 iperf -c 192.168.1.12 -u -p 5001 -b 200M -t 60 &
+h5 iperf -c 192.168.1.13 -u -p 5002 -b 200M -t 60 &
+h6 iperf -c 192.168.1.14 -u -p 5003 -b 200M -t 60
 
 -congestion stress test hexring-
 h5 iperf -s -u -p 5001 &
@@ -109,7 +109,7 @@ h1 iperf -c 192.168.1.12 -u -b 100M -t 30
 
 -high load test generic-
 h2 iperf -s &
-h1 iperf -c 192.168.1.12 -u -b 1000M -t 60
+h5 iperf -c 192.168.1.12 -u -b 200M -t 60
 
 -multi-flow test generic-
 h2 iperf -s -p 5001 &
