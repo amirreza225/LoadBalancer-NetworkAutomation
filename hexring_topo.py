@@ -75,6 +75,12 @@ def run():
     net.build()
     net.start()
 
+    print("Network started successfully!")
+    print("Topology: 6 switches (s1-s6) with hexring + chord links")
+    print("Hosts: h1-h6 with IPs 192.168.8.40-45")
+    print("Controller: Ryu at 127.0.0.1:6653")
+    print("Use 'pingall' to test connectivity")
+
     # Optional: enable STP at switch level if needed (for OVS) but it can cause multiple problems
     # for sw in net.switches:
     #     sw.cmd(f'ovs-vsctl set Bridge {sw.name} stp_enable=true')

@@ -1,0 +1,17 @@
+# SDN Load Balancer Python Dependencies
+# Core SDN controller framework
+ryu==4.34
+
+# WSGI server and utilities (used by Ryu) - exact version for compatibility
+eventlet==0.30.2
+routes>=2.5.1
+webob>=1.8.7
+
+# Note: Mininet is installed via system package manager (apt)
+# as it requires kernel modules and system-level integration
+
+# Optional development dependencies (uncomment if needed for development)
+# pytest>=7.0.0
+# flake8>=4.0.0
+# black>=22.0.0
+# mypy>=0.910

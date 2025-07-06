@@ -1,0 +1,110 @@
+version: '3.8'
+
+services:
+  sdn-load-balancer:
+    build: .
+    container_name: sdn-lb
+    privileged: true
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - /lib/modules:/lib/modules:ro
+    environment:
+      - TOPOLOGY=hexring
+      - SWITCHES=4
+      - THRESHOLD=25
+      - MODE=adaptive
+    ports:
+      - "8000:8000"  # Web dashboard
+      - "8080:8080"  # REST API
+      - "6653:6653"  # OpenFlow controller
+    command: /app/start.sh
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+
+  # Alternative configuration for linear topology
+  sdn-lb-linear:
+    build: .
+    container_name: sdn-lb-linear
+    privileged: true
+    network_mode: host
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - /lib/modules:/lib/modules:ro
+    environment:
+      - TOPOLOGY=linear
+      - SWITCHES=5
+      - THRESHOLD=25
+      - MODE=adaptive
+    ports:
+      - "8001:8000"  # Web dashboard (different port)
+      - "8081:8080"  # REST API (different port)
+      - "6654:6653"  # OpenFlow controller (different port)
+    command: /app/start.sh
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    profiles:
+      - linear
+
+  # Alternative configuration for ring topology
+  sdn-lb-ring:
+    build: .
+    container_name: sdn-lb-ring
+    privileged: true
+    network_mode: host
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - /lib/modules:/lib/modules:ro
+    environment:
+      - TOPOLOGY=ring
+      - SWITCHES=6
+      - THRESHOLD=25
+      - MODE=adaptive
+    ports:
+      - "8002:8000"  # Web dashboard (different port)
+      - "8082:8080"  # REST API (different port)
+      - "6655:6653"  # OpenFlow controller (different port)
+    command: /app/start.sh
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    profiles:
+      - ring
+
+  # Alternative configuration for mesh topology
+  sdn-lb-mesh:
+    build: .
+    container_name: sdn-lb-mesh
+    privileged: true
+    network_mode: host
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - /lib/modules:/lib/modules:ro
+    environment:
+      - TOPOLOGY=mesh
+      - SWITCHES=4
+      - THRESHOLD=25
+      - MODE=adaptive
+    ports:
+      - "8003:8000"  # Web dashboard (different port)
+      - "8083:8080"  # REST API (different port)
+      - "6656:6653"  # OpenFlow controller (different port)
+    command: /app/start.sh
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    profiles:
+      - mesh
+
+networks:
+  default:
+    driver: bridge
+
+volumes:
+  logs:
+  data:
