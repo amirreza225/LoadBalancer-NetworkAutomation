@@ -133,6 +133,14 @@ class LBRestController(ControllerBase):
         """Get efficiency statistics"""
         if hasattr(self.lb, 'efficiency_tracker'):
             stats = self.lb.efficiency_tracker.get_efficiency_summary()
+            
+            # Add congestion avoidance percentage and event details for dashboard
+            total_events = getattr(self.lb, 'total_congestion_avoidance_events', 0)
+            unique_flows = len(getattr(self.lb, 'flows_with_congestion_avoidance', set()))
+            
+            stats['congestion_avoidance_percentage'] = stats.get('congestion_avoidance_rate', 0)
+            stats['total_congestion_avoidance_events'] = total_events
+            stats['unique_flows_with_congestion_avoidance'] = unique_flows
         else:
             # Fallback to direct calculation
             now = time.time()
@@ -152,6 +160,14 @@ class LBRestController(ControllerBase):
                 'avg_path_length_lb': self.lb.efficiency_metrics.get('avg_path_length_lb', 0),
                 'avg_path_length_sp': self.lb.efficiency_metrics.get('avg_path_length_sp', 0)
             }
+        
+        # Add congestion avoidance percentage calculation for dashboard
+        total_events = getattr(self.lb, 'total_congestion_avoidance_events', 0)
+        unique_flows = len(getattr(self.lb, 'flows_with_congestion_avoidance', set()))
+        
+        stats['congestion_avoidance_percentage'] = stats['congestion_avoidance_rate']
+        stats['total_congestion_avoidance_events'] = total_events
+        stats['unique_flows_with_congestion_avoidance'] = unique_flows
         
         return self._cors(json.dumps(stats))
     

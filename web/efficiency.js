@@ -89,6 +89,14 @@ function updateMetricsDisplay(metrics) {
   updateMetric("congestionAvoidanceRate", 
     `${metrics.congestion_avoided || 0} flows`);
   
+  // Congestion avoidance percentage
+  const congestionPercentage = metrics.congestion_avoidance_percentage || 0;
+  updateMetric("congestionAvoidancePercentage", 
+    `${congestionPercentage.toFixed(1)}%`,
+    congestionPercentage > 70 ? "excellent" : 
+    congestionPercentage > 40 ? "good" : 
+    congestionPercentage > 15 ? "fair" : "poor");
+  
   // Total reroutes
   updateMetric("totalReroutes", metrics.total_reroutes || 0);
   
@@ -220,6 +228,7 @@ function resetEfficiencyDisplay() {
   updateMetric("loadBalancedFlows", 0);
   updateMetric("loadBalancingRate", "0%");
   updateMetric("congestionAvoidanceRate", "0 flows");
+  updateMetric("congestionAvoidancePercentage", "0%");
   updateMetric("totalReroutes", 0);
   updateMetric("varianceImprovement", "0%");
   updateMetric("pathOverhead", "0%");
