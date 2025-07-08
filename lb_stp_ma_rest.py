@@ -527,22 +527,23 @@ class LoadBalancerREST(app_manager.RyuApp):
                 congested_links = []
                 baseline_total_cost = 0
                 
-                # Check current congestion on baseline path
+                # Check current congestion on baseline path (using same threshold as path selection)
                 for i in range(len(baseline_path) - 1):
                     u, v = baseline_path[i], baseline_path[i + 1]
                     link_cost = cost.get((u, v), 0)
                     baseline_total_cost += link_cost
                     
-                    if link_cost > self.THRESHOLD_BPS:
+                    # Use same threshold as _is_path_congested method for consistency
+                    if link_cost > self.THRESHOLD_BPS * 0.5:  # 50% threshold for current congestion
                         baseline_congested = True
                         congested_links.append(f"{u}-{v} (current: {link_cost/1_000_000:.1f}M)")
                 
-                # Check predicted congestion on baseline path (>70% threshold)
+                # Check predicted congestion on baseline path (lower threshold for prediction)
                 if not baseline_congested:
                     for i in range(len(baseline_path) - 1):
                         u, v = baseline_path[i], baseline_path[i + 1]
                         link_cost = cost.get((u, v), 0)
-                        if link_cost > self.THRESHOLD_BPS * 0.5:  # 50% threshold for prediction
+                        if link_cost > self.THRESHOLD_BPS * 0.3:  # 30% threshold for prediction
                             predicted_congestion = True
                             congested_links.append(f"{u}-{v} (predicted: {link_cost/1_000_000:.1f}M)")
                             break
@@ -552,10 +553,38 @@ class LoadBalancerREST(app_manager.RyuApp):
                 
                 # Enhanced congestion avoidance criteria:
                 # 1. Baseline path has congestion (current or predicted), AND
-                # 2. We chose a different path that has lower utilization cost
+                # 2. We chose a different path 
+                # 3. The selected path either has lower cost OR avoids the congested links
                 congestion_detected = baseline_congested or predicted_congestion
                 path_different = path != baseline_path
-                avoided_congestion = selected_path_cost < baseline_total_cost * 0.95  # Selected path is better
+                
+                # More flexible avoidance criteria: either lower cost or avoiding congested links
+                if congestion_detected and path_different:
+                    # Check if we're avoiding the specific congested links
+                    selected_path_avoids_congestion = True
+                    for i in range(len(baseline_path) - 1):
+                        u, v = baseline_path[i], baseline_path[i + 1]
+                        link_cost = cost.get((u, v), 0)
+                        if link_cost > self.THRESHOLD_BPS * 0.5:  # This link is congested
+                            # Check if selected path uses this congested link
+                            if (u, v) in [(path[j], path[j+1]) for j in range(len(path)-1)]:
+                                selected_path_avoids_congestion = False
+                                break
+                    
+                    # Count as avoided if we either have lower cost OR avoid congested links
+                    avoided_congestion = (selected_path_cost < baseline_total_cost * 1.2) or selected_path_avoids_congestion
+                else:
+                    avoided_congestion = selected_path_cost < baseline_total_cost * 0.95
+                
+                # Debug logging for congestion avoidance
+                self.logger.info("Congestion avoidance check: detected=%s, path_different=%s, avoided=%s (selected=%.1fM, baseline=%.1fM, ratio=%.2f)", 
+                                congestion_detected, path_different, avoided_congestion, 
+                                selected_path_cost/1_000_000, baseline_total_cost/1_000_000, 
+                                selected_path_cost / (baseline_total_cost + 1) if baseline_total_cost > 0 else 0)
+                
+                if congestion_detected:
+                    self.logger.info("Congestion details: baseline_congested=%s, predicted_congestion=%s, congested_links=%s", 
+                                    baseline_congested, predicted_congestion, congested_links)
                 
                 if congestion_detected and path_different and avoided_congestion:
                     self.efficiency_metrics['congestion_avoided'] += 1
@@ -1017,6 +1046,60 @@ class LoadBalancerREST(app_manager.RyuApp):
             self._calculate_efficiency_metrics(now)
             self._cleanup_old_flows()  # Periodic cleanup to prevent memory leaks
 
+    def _track_congestion_avoidance_reroute(self, old_path, new_path, cost):
+        """
+        Track congestion avoidance during re-routing operations.
+        """
+        # Check if old path is congested
+        old_path_congested = False
+        predicted_congestion = False
+        congested_links = []
+        
+        for i in range(len(old_path) - 1):
+            u, v = old_path[i], old_path[i + 1]
+            link_cost = cost.get((u, v), 0)
+            
+            # Check current congestion (same threshold as path selection)
+            if link_cost > self.THRESHOLD_BPS * 0.5:  # 50% threshold for current congestion
+                old_path_congested = True
+                congested_links.append(f"{u}-{v} (current: {link_cost/1_000_000:.1f}M)")
+            # Check predicted congestion (lower threshold)
+            elif link_cost > self.THRESHOLD_BPS * 0.3:  # 30% threshold for prediction
+                predicted_congestion = True
+                congested_links.append(f"{u}-{v} (predicted: {link_cost/1_000_000:.1f}M)")
+        
+        congestion_detected = old_path_congested or predicted_congestion
+        
+        if congestion_detected:
+            # Calculate path costs
+            old_cost = self._calculate_path_cost(old_path, cost)
+            new_cost = self._calculate_path_cost(new_path, cost)
+            
+            # Check if we're avoiding the specific congested links
+            selected_path_avoids_congestion = True
+            for i in range(len(old_path) - 1):
+                u, v = old_path[i], old_path[i + 1]
+                link_cost = cost.get((u, v), 0)
+                if link_cost > self.THRESHOLD_BPS * 0.5:  # This link is congested
+                    # Check if new path uses this congested link
+                    if (u, v) in [(new_path[j], new_path[j+1]) for j in range(len(new_path)-1)]:
+                        selected_path_avoids_congestion = False
+                        break
+            
+            # Count as avoided if we either have lower cost OR avoid congested links
+            avoided_congestion = (new_cost < old_cost * 1.2) or selected_path_avoids_congestion
+            
+            if avoided_congestion:
+                self.efficiency_metrics['congestion_avoided'] += 1
+                reason = "current" if old_path_congested else "predicted"
+                self.logger.info("✓ Congestion AVOIDED during reroute (%s) - old path %s cost=%.1fM, new path %s cost=%.1fM, congested links: %s (total avoided: %d)", 
+                               reason, old_path, old_cost/1_000_000, new_path, new_cost/1_000_000,
+                               congested_links, self.efficiency_metrics['congestion_avoided'])
+            else:
+                self.logger.info("⚠ Congestion detected during reroute but NOT avoided - old cost=%.1fM, new cost=%.1fM (ratio=%.2f)", 
+                               old_cost/1_000_000, new_cost/1_000_000, 
+                               new_cost / (old_cost + 1))
+
     def _rebalance(self, now):
         """
         Periodically recalculates paths based on current link utilization.
@@ -1057,6 +1140,9 @@ class LoadBalancerREST(app_manager.RyuApp):
                 should_reroute = old_path_congested or (old_cost > 0 and (old_cost - new_cost) / old_cost > 0.2)
                 
                 if should_reroute:
+                    # Track congestion avoidance for this re-routing
+                    self._track_congestion_avoidance_reroute(old_path, new_path, cost)
+                    
                     src_name = self.hosts.get(src, src)
                     dst_name = self.hosts.get(dst, dst)
                     self.logger.info("Re-routing %s→%s: %s → %s", src_name, dst_name, old_path, new_path)
