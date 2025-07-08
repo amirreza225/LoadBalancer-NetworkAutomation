@@ -158,7 +158,7 @@ sudo python3 hexring_topo.py
 
 # 2. Start enhanced controller (in new terminal)
 ./docker-run.sh shell
-ryu-manager --observe-links --ofp-tcp-listen-port 6653 --wsapi-port 8080 --wsapi-host 0.0.0.0 lb_stp_ma_rest.py
+ryu-manager --observe-links --ofp-tcp-listen-port 6653 --wsapi-port 8080 --wsapi-host 0.0.0.0 lb_modular.py
 
 # 3. Launch web dashboard (in new terminal)
 ./docker-run.sh shell
@@ -166,8 +166,9 @@ cd web && python3 -m http.server 8000
 ```
 
 **⚠️ IMPORTANT STARTUP ORDER:**
+
 1. **Topology FIRST** - Ensures proper host discovery (h1-h6 with correct MACs)
-2. **Controller SECOND** - Discovers the established topology correctly  
+2. **Controller SECOND** - Discovers the established topology correctly
 3. **Web Dashboard THIRD** - Visualizes the correct discovered topology
 
 If you start controller first, use the **"Cleanup Hosts"** button in the web interface to reset host discovery.

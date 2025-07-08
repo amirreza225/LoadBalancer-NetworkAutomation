@@ -252,8 +252,33 @@ class TrafficMonitor:
                         selected_path_avoids_congestion = False
                         break
             
-            # Criteria: avoid congested links AND have cost improvement (10%)
-            avoided_congestion = selected_path_avoids_congestion and (new_cost < old_cost * 0.9)
+            # ENHANCED Criteria for REAL congestion avoidance during rerouting:
+            # 1. Avoid congested links, AND
+            # 2. Significant cost improvement (30%), AND  
+            # 3. New path is not heavily congested itself
+            cost_improvement_threshold = old_cost * 0.7  # Must be 30% better
+            has_significant_improvement = new_cost < cost_improvement_threshold
+            
+            # Check if new path itself is not heavily congested
+            new_path_acceptable = True
+            new_path_max_congestion = 0
+            for j in range(len(new_path) - 1):
+                u, v = new_path[j], new_path[j + 1]
+                link_cost = cost.get((u, v), 0)
+                new_path_max_congestion = max(new_path_max_congestion, link_cost)
+                if link_cost > self.parent_app.THRESHOLD_BPS * 0.5:  # 50% threshold
+                    new_path_acceptable = False
+                    break
+            
+            # STRICTER criteria for rerouting congestion avoidance
+            avoided_congestion = selected_path_avoids_congestion and has_significant_improvement and new_path_acceptable
+            
+            if not avoided_congestion:
+                # Log why rerouting was not considered real congestion avoidance
+                improvement_pct = ((old_cost - new_cost) / old_cost) * 100 if old_cost > 0 else 0
+                self.logger.debug("✗ Rerouting NOT real congestion avoidance: avoids_links=%s, significant_improvement=%s (%.1f%% < 30%%), path_acceptable=%s (max=%.1fM)", 
+                               selected_path_avoids_congestion, has_significant_improvement, improvement_pct, 
+                               new_path_acceptable, new_path_max_congestion/1_000_000)
             
             if avoided_congestion:
                 # Track congestion avoidance for rerouting flows

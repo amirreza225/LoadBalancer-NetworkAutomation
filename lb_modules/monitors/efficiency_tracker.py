@@ -116,15 +116,16 @@ class EfficiencyTracker:
                     # Track congestion avoidance - only if we actually avoid congested links
                     avoided_congestion = False
                     
-                    # Criteria for congestion avoidance:
+                    # ENHANCED Criteria for REAL congestion avoidance:
                     # 1. Baseline path has ACTUALLY congested links (>30% threshold), AND  
                     # 2. Selected path avoids those congested links, AND
-                    # 3. Selected path has lower total cost (>10% improvement)
+                    # 3. Selected path has SIGNIFICANT cost improvement (>30% improvement), AND
+                    # 4. Selected path is not heavily congested itself (links <50% threshold)
                     if baseline_congested and path != baseline_path:
                         selected_path_avoids_congestion = True
                         selected_path_links = [(path[j], path[j+1]) for j in range(len(path)-1)]
                         
-                        self.logger.debug("Evaluating congestion avoidance for different path %s vs baseline %s", path, baseline_path)
+                        self.logger.debug("Evaluating REAL congestion avoidance for different path %s vs baseline %s", path, baseline_path)
                         
                         # Check if selected path avoids congested links from baseline
                         for i in range(len(baseline_path) - 1):
@@ -139,17 +140,41 @@ class EfficiencyTracker:
                                 else:
                                     self.logger.debug("Selected path avoids congested link %s-%s", u, v)
                         
-                        # Cost improvement requirement: 10% better performance
-                        # Only count as avoided if we actually avoid congested links AND have cost improvement
-                        cost_improvement_threshold = baseline_total_cost * 0.9
-                        has_cost_improvement = selected_path_cost < cost_improvement_threshold
+                        # STRICTER cost improvement requirement: 30% better performance
+                        cost_improvement_threshold = baseline_total_cost * 0.7  # Must be 30% better
+                        has_significant_cost_improvement = selected_path_cost < cost_improvement_threshold
                         
-                        self.logger.debug("Congestion avoidance evaluation: avoids_links=%s, cost_improvement=%s (%.1fM < %.1fM)", 
-                                        selected_path_avoids_congestion, has_cost_improvement, 
-                                        selected_path_cost/1_000_000, cost_improvement_threshold/1_000_000)
+                        # NEW: Check if selected path itself is not heavily congested (links <50% threshold)
+                        selected_path_acceptable = True
+                        selected_path_max_congestion = 0
+                        for j in range(len(path) - 1):
+                            u, v = path[j], path[j + 1]
+                            link_cost = cost.get((u, v), 0)
+                            selected_path_max_congestion = max(selected_path_max_congestion, link_cost)
+                            # If selected path has links >50% threshold, it's also congested
+                            if link_cost > self.parent_app.THRESHOLD_BPS * 0.5:  # 50% threshold
+                                selected_path_acceptable = False
+                                self.logger.debug("Selected path link %s-%s is also congested: %.1fM > 50%% threshold", 
+                                                u, v, link_cost/1_000_000)
                         
-                        if selected_path_avoids_congestion and has_cost_improvement:
+                        # NEW: Calculate actual congestion reduction percentage
+                        if baseline_total_cost > 0:
+                            congestion_reduction = ((baseline_total_cost - selected_path_cost) / baseline_total_cost) * 100
+                        else:
+                            congestion_reduction = 0
+                        
+                        self.logger.debug("REAL congestion avoidance evaluation: avoids_links=%s, significant_improvement=%s (%.1f%% reduction), path_acceptable=%s (max_congestion=%.1fM)", 
+                                        selected_path_avoids_congestion, has_significant_cost_improvement, 
+                                        congestion_reduction, selected_path_acceptable, selected_path_max_congestion/1_000_000)
+                        
+                        # STRICTER criteria: Must avoid links AND have significant improvement AND path not heavily congested
+                        if selected_path_avoids_congestion and has_significant_cost_improvement and selected_path_acceptable:
                             avoided_congestion = True
+                            self.logger.info("✓ REAL Congestion AVOIDED: %.1f%% utilization reduction, selected path max congestion: %.1fM", 
+                                           congestion_reduction, selected_path_max_congestion/1_000_000)
+                        else:
+                            self.logger.debug("✗ NOT real congestion avoidance: avoids=%s, improvement=%s, acceptable=%s", 
+                                           selected_path_avoids_congestion, has_significant_cost_improvement, selected_path_acceptable)
                     
                     # Count flows that avoid congestion with time-based re-counting
                     if avoided_congestion:
@@ -558,8 +583,13 @@ class EfficiencyTracker:
             cost = self.parent_app._calculate_link_costs(now)
             flows_evaluated = 0
             
-            self.logger.info("Re-evaluating %d existing flows under new load balancing mode", 
-                           len(self.parent_app.flow_paths))
+            # Get current mode name for logging
+            from ..config.constants import LOAD_BALANCING_MODES
+            mode_names = {v: k for k, v in LOAD_BALANCING_MODES.items()}
+            current_mode = mode_names.get(self.parent_app.load_balancing_mode, 'unknown')
+            
+            self.logger.info("Re-evaluating %d existing flows under NEW '%s' mode to determine different congestion avoidance behavior", 
+                           len(self.parent_app.flow_paths), current_mode)
             
             for flow_key, current_path in self.parent_app.flow_paths.items():
                 if len(flow_key) != 2:
@@ -577,10 +607,25 @@ class EfficiencyTracker:
                 if not src_dpid or not dst_dpid:
                     continue
                 
-                # Evaluate this flow's path under the new mode
-                self.update_flow_metrics(src_dpid, dst_dpid, current_path, cost, 
-                                       flow_key[0] if isinstance(flow_key[0], str) else None,
-                                       flow_key[1] if isinstance(flow_key[1], str) else None)
+                # Simulate what path the NEW MODE would choose for this flow
+                if hasattr(self.parent_app, 'path_selector'):
+                    # Get what path the new mode would select
+                    new_mode_path = self.parent_app.path_selector.find_path(src_dpid, dst_dpid, cost)
+                    if new_mode_path:
+                        # Evaluate this flow using the path the NEW MODE would choose
+                        self._evaluate_existing_flow_metrics(src_dpid, dst_dpid, new_mode_path, cost, 
+                                                            flow_key[0] if isinstance(flow_key[0], str) else None,
+                                                            flow_key[1] if isinstance(flow_key[1], str) else None)
+                    else:
+                        # Fallback to current path if new mode can't find a path
+                        self._evaluate_existing_flow_metrics(src_dpid, dst_dpid, current_path, cost, 
+                                                            flow_key[0] if isinstance(flow_key[0], str) else None,
+                                                            flow_key[1] if isinstance(flow_key[1], str) else None)
+                else:
+                    # Fallback if no path selector available
+                    self._evaluate_existing_flow_metrics(src_dpid, dst_dpid, current_path, cost, 
+                                                        flow_key[0] if isinstance(flow_key[0], str) else None,
+                                                        flow_key[1] if isinstance(flow_key[1], str) else None)
                 flows_evaluated += 1
             
             self.logger.info("Re-evaluated %d flows under new mode, metrics updated", flows_evaluated)
@@ -588,6 +633,143 @@ class EfficiencyTracker:
         # Schedule the re-evaluation to run asynchronously
         from ryu.lib import hub
         hub.spawn(reevaluate_flows)
+    
+    def _evaluate_existing_flow_metrics(self, s_dpid, d_dpid, path, cost, src_mac=None, dst_mac=None):
+        """Evaluate efficiency metrics for an existing flow WITHOUT incrementing total_flows."""
+        # DO NOT increment total_flows - this flow is already counted
+        
+        # Use MAC-based flow key for consistency with main controller
+        # Fall back to DPID-based key if MAC addresses not provided
+        if src_mac and dst_mac:
+            flow_key = (src_mac, dst_mac)
+        else:
+            flow_key = (s_dpid, d_dpid)
+        
+        # Also track the DPID-based key for internal calculations
+        dpid_flow_key = (s_dpid, d_dpid)
+        baseline_path = None
+        
+        # If we have alternative paths stored, the first one should be the hop-count baseline
+        if hasattr(self.parent_app, 'alternative_paths') and dpid_flow_key in self.parent_app.alternative_paths:
+            alt_paths = self.parent_app.alternative_paths[dpid_flow_key]
+            if alt_paths:
+                baseline_path = alt_paths[0]  # First path is hop-count baseline
+        
+        if not baseline_path:
+            # Fallback to calculating baseline path
+            baseline_path = self._shortest_path_baseline(s_dpid, d_dpid)
+        
+        self.logger.debug("Existing flow re-evaluation - Selected path: %s, Baseline (hop-count): %s, Flow key: %s", path, baseline_path, flow_key)
+        
+        if baseline_path:
+            # Check if we're using a different path than shortest path
+            if path != baseline_path:
+                self.efficiency_metrics['load_balanced_flows'] += 1
+                self.logger.debug("Existing flow %s: using path %s instead of baseline %s (load balanced)", 
+                                flow_key, path, baseline_path)
+            
+            # Enhanced congestion avoidance detection (same logic as update_flow_metrics)
+            if len(baseline_path) > 1:
+                baseline_congested = False
+                predicted_congestion = False
+                congested_links = []
+                baseline_total_cost = 0
+                
+                # Check current congestion on baseline path
+                congestion_threshold = self.parent_app.THRESHOLD_BPS * 0.3  # 30% threshold
+                
+                for i in range(len(baseline_path) - 1):
+                    u, v = baseline_path[i], baseline_path[i + 1]
+                    link_cost = cost.get((u, v), 0)
+                    baseline_total_cost += link_cost
+                    
+                    # Only count actual congestion (>30% threshold) for avoidance tracking
+                    if link_cost > congestion_threshold:  # 30% threshold for actual congestion
+                        baseline_congested = True
+                        congested_links.append(f"{u}-{v} (congested: {link_cost/1_000_000:.1f}M)")
+                
+                # Only count actual congestion, not predicted
+                congestion_detected = baseline_congested
+                
+                if congestion_detected:
+                    # Calculate selected path cost for comparison
+                    selected_path_cost = self._calculate_path_cost(path, cost)
+                    
+                    # Track congestion avoidance - only if we actually avoid congested links
+                    avoided_congestion = False
+                    
+                    # Criteria for congestion avoidance (same as update_flow_metrics)
+                    if baseline_congested and path != baseline_path:
+                        selected_path_avoids_congestion = True
+                        selected_path_links = [(path[j], path[j+1]) for j in range(len(path)-1)]
+                        
+                        # Check if selected path avoids congested links from baseline
+                        for i in range(len(baseline_path) - 1):
+                            u, v = baseline_path[i], baseline_path[i + 1]
+                            link_cost = cost.get((u, v), 0)
+                            if link_cost > congestion_threshold:  # This link is congested
+                                # Check if selected path uses this congested link
+                                if (u, v) in selected_path_links:
+                                    selected_path_avoids_congestion = False
+                                    break
+                        
+                        # STRICTER cost improvement requirement: 30% better performance (same as main logic)
+                        cost_improvement_threshold = baseline_total_cost * 0.7  # Must be 30% better
+                        has_significant_cost_improvement = selected_path_cost < cost_improvement_threshold
+                        
+                        # Check if selected path itself is not heavily congested (same logic)
+                        selected_path_acceptable = True
+                        selected_path_max_congestion = 0
+                        for j in range(len(path) - 1):
+                            u, v = path[j], path[j + 1]
+                            link_cost = cost.get((u, v), 0)
+                            selected_path_max_congestion = max(selected_path_max_congestion, link_cost)
+                            if link_cost > self.parent_app.THRESHOLD_BPS * 0.5:  # 50% threshold
+                                selected_path_acceptable = False
+                                break
+                        
+                        # STRICTER criteria (same as main logic)
+                        if selected_path_avoids_congestion and has_significant_cost_improvement and selected_path_acceptable:
+                            avoided_congestion = True
+                    
+                    # Count flows that avoid congestion with time-based re-counting (same logic)
+                    if avoided_congestion:
+                        now = time.time()
+                        
+                        # Initialize congestion avoidance tracking if not present
+                        if not hasattr(self.parent_app, 'congestion_avoidance_events'):
+                            self.parent_app.congestion_avoidance_events = {}
+                        
+                        # Check if this flow avoided congestion recently (within 30 seconds)
+                        last_avoidance = self.parent_app.congestion_avoidance_events.get(flow_key)
+                        
+                        # Initialize event counter if not present
+                        if not hasattr(self.parent_app, 'total_congestion_avoidance_events'):
+                            self.parent_app.total_congestion_avoidance_events = 0
+                        
+                        if last_avoidance is None:
+                            # First time this flow avoids congestion
+                            self.flows_with_congestion_avoidance.add(flow_key)
+                            self.parent_app.congestion_avoidance_events[flow_key] = now
+                            self.parent_app.total_congestion_avoidance_events += 1
+                            
+                            cost_improvement = ((baseline_total_cost - selected_path_cost) / baseline_total_cost) * 100
+                            self.logger.debug("✓ Existing flow congestion AVOIDED (event #%d) - baseline %s cost=%.1fM, selected %s cost=%.1fM (%.1f%% improvement), flow key: %s", 
+                                           self.parent_app.total_congestion_avoidance_events, baseline_path, baseline_total_cost/1_000_000, path, selected_path_cost/1_000_000,
+                                           cost_improvement, flow_key)
+                        else:
+                            # Flow has avoided congestion before, check cooldown
+                            time_since_last = now - last_avoidance
+                            
+                            if time_since_last > 30:
+                                # Enough time has passed, count it as a new event
+                                self.parent_app.congestion_avoidance_events[flow_key] = now
+                                self.parent_app.total_congestion_avoidance_events += 1
+                                
+                                cost_improvement = ((baseline_total_cost - selected_path_cost) / baseline_total_cost) * 100
+                                self.logger.debug("✓ Existing flow congestion AVOIDED again after %.1fs (event #%d) - baseline %s cost=%.1fM, selected %s cost=%.1fM (%.1f%% improvement), flow key: %s", 
+                                               time_since_last, self.parent_app.total_congestion_avoidance_events, baseline_path, baseline_total_cost/1_000_000, path, selected_path_cost/1_000_000,
+                                               cost_improvement, flow_key)
     
     def increment_reroutes(self):
         """Increment reroute counter."""
