@@ -8,6 +8,7 @@ including load balancing rates, congestion avoidance, and variance analysis.
 
 import time
 import collections
+from .path_congestion_calculator import PathCongestionCalculator
 
 
 class EfficiencyTracker:
@@ -18,6 +19,9 @@ class EfficiencyTracker:
     def __init__(self, parent_app):
         self.parent_app = parent_app
         self.logger = parent_app.logger
+        
+        # Initialize path-based congestion calculator
+        self.path_calculator = PathCongestionCalculator(parent_app)
         
         # Initialize efficiency metrics
         self.efficiency_metrics = {
@@ -35,9 +39,24 @@ class EfficiencyTracker:
         # Track flows that have avoided congestion (prevent double counting)
         self.flows_with_congestion_avoidance = set()
         
+        # Track flows that encountered congested baseline paths (proper denominator for congestion avoidance %)
+        self.flows_with_congested_baseline = set()
+        
+        # Time-based tracking for congestion avoidance events and flow activity
+        self.congestion_avoidance_events = {}  # flow_key -> timestamp of last avoidance
+        self.flow_activity_timestamps = {}     # flow_key -> timestamp of last activity
+        self.total_congestion_avoidance_events = 0
+        
+        # (Removed 10-second window tracking - keeping it simple)
+        
         # Update parent app references
         self.parent_app.efficiency_metrics = self.efficiency_metrics
         self.parent_app.flows_with_congestion_avoidance = self.flows_with_congestion_avoidance
+        self.parent_app.flows_with_congested_baseline = self.flows_with_congested_baseline
+        self.parent_app.congestion_avoidance_events = self.congestion_avoidance_events
+        self.parent_app.flow_activity_timestamps = self.flow_activity_timestamps
+        self.parent_app.total_congestion_avoidance_events = self.total_congestion_avoidance_events
+        # (Removed 10-second window references)
     
     def update_flow_metrics(self, s_dpid, d_dpid, path, cost, src_mac=None, dst_mac=None):
         """Update efficiency metrics for a new flow."""
@@ -49,6 +68,12 @@ class EfficiencyTracker:
             flow_key = (src_mac, dst_mac)
         else:
             flow_key = (s_dpid, d_dpid)
+        
+        # Track flow activity timestamp for time-based calculations
+        now = time.time()
+        self.flow_activity_timestamps[flow_key] = now
+        
+        # (Old flow_events_with_timestamps tracking removed - now using 10-second window approach)
         
         # Also track the DPID-based key for internal calculations
         dpid_flow_key = (s_dpid, d_dpid)
@@ -102,6 +127,12 @@ class EfficiencyTracker:
                     else:
                         self.logger.debug("Link %s-%s not congested: %.1f Mbps <= %.1f Mbps threshold", 
                                         u, v, link_cost/1_000_000, congestion_threshold/1_000_000)
+                
+                # Track flows that encounter congested baseline paths (for proper percentage calculation)
+                if baseline_congested:
+                    self.flows_with_congested_baseline.add(flow_key)
+                    self.logger.info("TRACKING: Flow %s has congested baseline path, total with congested baseline: %d", 
+                                    flow_key, len(self.flows_with_congested_baseline))
                 
                 # Only count actual congestion, not predicted
                 congestion_detected = baseline_congested
@@ -197,6 +228,8 @@ class EfficiencyTracker:
                             self.parent_app.congestion_avoidance_events[flow_key] = now
                             self.parent_app.total_congestion_avoidance_events += 1
                             
+                            # (Removed 10-second window tracking)
+                            
                             cost_improvement = ((baseline_total_cost - selected_path_cost) / baseline_total_cost) * 100
                             self.logger.info("✓ Congestion AVOIDED (event #%d) - baseline %s cost=%.1fM, selected %s cost=%.1fM (%.1f%% improvement), congested links: %s (flow key: %s)", 
                                            self.parent_app.total_congestion_avoidance_events, baseline_path, baseline_total_cost/1_000_000, path, selected_path_cost/1_000_000,
@@ -209,6 +242,8 @@ class EfficiencyTracker:
                                 # Enough time has passed, count it as a new event
                                 self.parent_app.congestion_avoidance_events[flow_key] = now
                                 self.parent_app.total_congestion_avoidance_events += 1
+                                
+                                # (Removed 10-second window tracking)
                                 
                                 cost_improvement = ((baseline_total_cost - selected_path_cost) / baseline_total_cost) * 100
                                 self.logger.info("✓ Congestion AVOIDED again after %.1fs (event #%d) - baseline %s cost=%.1fM, selected %s cost=%.1fM (%.1f%% improvement), congested links: %s (flow key: %s)", 
@@ -245,6 +280,59 @@ class EfficiencyTracker:
             return 0
         return sum(cost.get((path[i], path[i+1]), 0) for i in range(len(path)-1))
     
+    def calculate_path_congestion_avoidance(self, now):
+        """Calculate path-based congestion avoidance percentage.
+        
+        Path_Congestion_Avoidance_% = (Available_Paths / Total_Required_Paths) × 100
+        Where:
+        - Available_Paths = Non-congested paths
+        - Total_Required_Paths = Paths needed for current traffic
+        """
+        if not hasattr(self.parent_app, 'alternative_paths'):
+            return 0
+        
+        total_paths = 0
+        available_paths = 0
+        congestion_threshold = self.parent_app.THRESHOLD_BPS * 0.85  # 85% threshold
+        
+        # Get current link costs for congestion evaluation
+        cost = self.parent_app._calculate_link_costs(now) if hasattr(self.parent_app, '_calculate_link_costs') else {}
+        
+        # Analyze all stored alternative paths
+        for flow_key, paths in self.parent_app.alternative_paths.items():
+            for path in paths:
+                total_paths += 1
+                
+                # Check if ANY link in the path is congested
+                path_congested = False
+                path_max_utilization = 0
+                
+                for i in range(len(path) - 1):
+                    u, v = path[i], path[i + 1]
+                    link_util = cost.get((u, v), 0)
+                    path_max_utilization = max(path_max_utilization, link_util)
+                    
+                    if link_util > congestion_threshold:
+                        path_congested = True
+                        break
+                
+                if not path_congested:
+                    available_paths += 1
+                    self.logger.debug("Path %s available (max util: %.1fM < %.1fM threshold)", 
+                                    path, path_max_utilization/1_000_000, congestion_threshold/1_000_000)
+                else:
+                    self.logger.debug("Path %s congested (max util: %.1fM > %.1fM threshold)", 
+                                    path, path_max_utilization/1_000_000, congestion_threshold/1_000_000)
+        
+        # Calculate avoidance percentage
+        if total_paths > 0:
+            avoidance_percent = (available_paths / total_paths) * 100
+            self.logger.info("Path-based congestion avoidance: %d available paths out of %d total = %.1f%%",
+                           available_paths, total_paths, avoidance_percent)
+            return avoidance_percent
+        else:
+            return 0
+    
     def calculate_efficiency_metrics(self, now):
         """Calculate and update efficiency metrics with bounds checking."""
         # Calculate load balancing rate with validation
@@ -256,32 +344,31 @@ class EfficiencyTracker:
         else:
             load_balancing_rate = 0
         
-        # Calculate congestion avoidance rate using event counting
-        if self.efficiency_metrics['total_flows'] > 0:
-            # Get total events and unique flows that avoided congestion
-            total_events = getattr(self.parent_app, 'total_congestion_avoidance_events', 0)
-            unique_flows_avoided = len(self.flows_with_congestion_avoidance)
+        # NEW: Use path-based congestion avoidance calculation
+        path_congestion_avoidance = self.path_calculator.calculate_path_congestion_avoidance(now)
+        weighted_path_avoidance = self.path_calculator.calculate_weighted_path_congestion_avoidance(now)
+        binary_path_avoidance = self.path_calculator.calculate_binary_path_state(now)
+        
+        # Choose the best available calculation method
+        if path_congestion_avoidance > 0:
+            congestion_avoidance_rate = path_congestion_avoidance
+            self.logger.info("Using path-based congestion avoidance rate: %.1f%% (weighted: %.1f%%, binary: %.1f%%)", 
+                           path_congestion_avoidance, weighted_path_avoidance, binary_path_avoidance)
+        elif len(self.flows_with_congested_baseline) > 0:
+            # FALLBACK: Use flow-based calculation if path-based returns 0
+            flow_congestion_avoidance = (len(self.flows_with_congestion_avoidance) / len(self.flows_with_congested_baseline)) * 100
+            congestion_avoidance_rate = min(100.0, max(0.0, flow_congestion_avoidance))
             
-            # Update the efficiency metric to use total events
-            self.efficiency_metrics['congestion_avoided'] = total_events
-            
-            # Calculate rate based on unique flows (more meaningful percentage)
-            # but store the actual event count for display
-            unique_flows_capped = min(unique_flows_avoided, self.efficiency_metrics['total_flows'])
-            congestion_avoidance_rate = (unique_flows_capped / self.efficiency_metrics['total_flows']) * 100
-            
-            # Cap at reasonable maximum (90% since flows can avoid congestion multiple times)
-            congestion_avoidance_rate = min(90.0, max(0.0, congestion_avoidance_rate))
-            
-            # Enhanced logging for debugging
-            if congestion_avoidance_rate > 50:
-                self.logger.warning("High congestion avoidance rate: %d events total, %d unique flows out of %d total flows = %.1f%% rate",
-                                  total_events, unique_flows_avoided, self.efficiency_metrics['total_flows'], congestion_avoidance_rate)
-            else:
-                self.logger.info("Congestion avoidance: %d events total, %d unique flows out of %d total flows = %.1f%% rate",
-                                total_events, unique_flows_avoided, self.efficiency_metrics['total_flows'], congestion_avoidance_rate)
+            self.logger.info("Using flow-based congestion avoidance: %d flows avoided out of %d flows with congested baselines = %.1f%% rate",
+                            len(self.flows_with_congestion_avoidance), len(self.flows_with_congested_baseline), congestion_avoidance_rate)
         else:
             congestion_avoidance_rate = 0
+            self.logger.info("No congestion avoidance data available, using 0%% rate")
+        
+        # Update efficiency metric 
+        self.efficiency_metrics['congestion_avoided'] = len(self.flows_with_congestion_avoidance)
+        
+        # (Removed 10-second window tracking - keeping it simple)
         
         # Calculate variance improvement
         variance_improvement = self._calculate_variance_improvement(now)
@@ -499,18 +586,24 @@ class EfficiencyTracker:
         
         # Clear congestion avoidance tracking for new mode
         self.flows_with_congestion_avoidance.clear()
+        self.flows_with_congested_baseline.clear()  # Reset flows with congested baseline tracking
         
-        # Clear congestion avoidance events tracking
+        # Clear time-based tracking but PRESERVE flow activity timestamps (flows are still active!)
+        self.congestion_avoidance_events.clear()
+        # DON'T clear flow_activity_timestamps - flows are still active under new mode
+        self.total_congestion_avoidance_events = 0
+        
+        # Clear parent app tracking (but preserve flow activity timestamps)
         if hasattr(self.parent_app, 'congestion_avoidance_events'):
             self.parent_app.congestion_avoidance_events.clear()
-        
-        # Reset event counter
+        # DON'T clear flow_activity_timestamps - flows are still active under new mode
         if hasattr(self.parent_app, 'total_congestion_avoidance_events'):
             self.parent_app.total_congestion_avoidance_events = 0
         
         # Update parent app references
         self.parent_app.efficiency_metrics = self.efficiency_metrics
         self.parent_app.flows_with_congestion_avoidance = self.flows_with_congestion_avoidance
+        self.parent_app.flows_with_congested_baseline = self.flows_with_congested_baseline
         
         self.logger.info("Efficiency metrics reset for mode change - %d existing flows counted, load balancing and congestion avoidance metrics reset", 
                         existing_flows_count)
@@ -687,6 +780,12 @@ class EfficiencyTracker:
                     if link_cost > congestion_threshold:  # 30% threshold for actual congestion
                         baseline_congested = True
                         congested_links.append(f"{u}-{v} (congested: {link_cost/1_000_000:.1f}M)")
+                
+                # Track flows that encounter congested baseline paths (for proper percentage calculation)
+                if baseline_congested:
+                    self.flows_with_congested_baseline.add(flow_key)
+                    self.logger.info("TRACKING (re-eval): Flow %s has congested baseline path, total with congested baseline: %d", 
+                                    flow_key, len(self.flows_with_congested_baseline))
                 
                 # Only count actual congestion, not predicted
                 congestion_detected = baseline_congested

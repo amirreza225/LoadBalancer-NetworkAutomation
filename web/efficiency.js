@@ -1,5 +1,15 @@
 // Efficiency metrics visualization
 let efficiencyChart;
+let congestionTrendsChart;
+
+// Data storage for congestion avoidance trends
+let congestionTrendsData = {
+  timestamps: [],
+  pathBased: []
+};
+
+let currentLoadBalancingMode = "unknown";
+const MAX_DATA_POINTS = 60; // Keep last 60 data points (5 minutes at 5-second intervals)
 
 // Initialize efficiency metrics chart
 function initEfficiencyChart() {
@@ -27,6 +37,83 @@ function initEfficiencyChart() {
       }
     }
   });
+}
+
+// Initialize congestion trends display using a simple progress bar approach
+function initCongestionTrendsChart() {
+  const container = document.getElementById("congestionTrendsContainer");
+  if (!container) {
+    console.log("congestionTrendsContainer not found, skipping initialization");
+    return;
+  }
+  
+  // Create a simple real-time display instead of complex charts
+  container.innerHTML = `
+    <div class="congestion-trends-display">
+      <div class="trend-header">
+        <h4>Real-time Congestion Avoidance</h4>
+        <div class="current-value" id="currentCongestionValue">0%</div>
+      </div>
+      <div class="trend-bar-container">
+        <div class="trend-bar" id="congestionTrendBar" style="width: 0%"></div>
+      </div>
+      <div class="trend-history" id="trendHistory">
+        <div class="history-label">Recent Values:</div>
+        <div class="history-values" id="historyValues"></div>
+      </div>
+    </div>
+    <style>
+      .congestion-trends-display {
+        background: white;
+        border-radius: 8px;
+        padding: 20px;
+        margin: 10px 0;
+      }
+      .trend-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 15px;
+      }
+      .current-value {
+        font-size: 2em;
+        font-weight: bold;
+        color: #007bff;
+      }
+      .trend-bar-container {
+        background: #f0f0f0;
+        border-radius: 10px;
+        height: 30px;
+        position: relative;
+        margin: 15px 0;
+      }
+      .trend-bar {
+        background: linear-gradient(90deg, #28a745, #007bff, #6f42c1);
+        height: 100%;
+        border-radius: 10px;
+        transition: width 0.5s ease;
+        position: relative;
+      }
+      .trend-history {
+        margin-top: 15px;
+      }
+      .history-label {
+        font-weight: bold;
+        margin-bottom: 5px;
+      }
+      .history-values {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .history-value {
+        background: #e9ecef;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 0.9em;
+      }
+    </style>
+  `;
 }
 
 // Update efficiency metrics display
@@ -58,6 +145,9 @@ async function updateEfficiencyMetrics() {
     // Update metrics display
     updateMetricsDisplay(metrics);
     
+    // Update congestion trends chart with enhanced metrics
+    updateCongestionTrends(metrics);
+    
   } catch (error) {
     console.error("Error updating efficiency metrics:", error);
     // Show error in UI
@@ -85,12 +175,8 @@ function updateMetricsDisplay(metrics) {
   updateMetric("loadBalancingRate", 
     `${(metrics.load_balancing_rate || 0).toFixed(1)}%`);
   
-  // Congestion avoidance count (absolute number)
-  updateMetric("congestionAvoidanceRate", 
-    `${metrics.congestion_avoided || 0} flows`);
-  
-  // Congestion avoidance percentage
-  const congestionPercentage = metrics.congestion_avoidance_percentage || 0;
+  // Congestion avoidance percentage (enhanced algorithm)
+  const congestionPercentage = metrics.enhanced_path_congestion_avoidance || metrics.congestion_avoidance_percentage || 0;
   updateMetric("congestionAvoidancePercentage", 
     `${congestionPercentage.toFixed(1)}%`,
     congestionPercentage > 70 ? "excellent" : 
@@ -168,6 +254,8 @@ function calculateEfficiencyScore(metrics) {
   // Debug logging to investigate high scores
   console.log("Efficiency calculation input:", {
     congestion_avoidance_rate: metrics.congestion_avoidance_rate,
+    flows_with_congested_baseline: metrics.flows_with_congested_baseline,
+    unique_flows_avoided: metrics.unique_flows_with_congestion_avoidance,
     variance_improvement_percent: metrics.variance_improvement_percent,
     capped_variance: cappedVarianceImprovement,
     load_balancing_rate: metrics.load_balancing_rate,
@@ -214,6 +302,80 @@ function calculateEfficiencyScore(metrics) {
   return finalScore;
 }
 
+// Update congestion trends display with new data
+async function updateCongestionTrends(metrics) {
+  const container = document.getElementById("congestionTrendsContainer");
+  if (!container) return;
+  
+  // Extract enhanced metrics if available
+  const pathBasedValue = metrics.enhanced_path_congestion_avoidance || 0;
+  
+  // Add new data point to history
+  congestionTrendsData.timestamps.push(new Date());
+  congestionTrendsData.pathBased.push(pathBasedValue);
+  
+  // Keep only last MAX_DATA_POINTS
+  if (congestionTrendsData.timestamps.length > MAX_DATA_POINTS) {
+    congestionTrendsData.timestamps.shift();
+    congestionTrendsData.pathBased.shift();
+  }
+  
+  // Update current value display
+  const currentValueElement = document.getElementById("currentCongestionValue");
+  if (currentValueElement) {
+    currentValueElement.textContent = `${pathBasedValue.toFixed(1)}%`;
+    // Change color based on value
+    if (pathBasedValue > 80) {
+      currentValueElement.style.color = "#28a745"; // Green for high
+    } else if (pathBasedValue > 50) {
+      currentValueElement.style.color = "#007bff"; // Blue for medium
+    } else {
+      currentValueElement.style.color = "#dc3545"; // Red for low
+    }
+  }
+  
+  // Update progress bar
+  const trendBar = document.getElementById("congestionTrendBar");
+  if (trendBar) {
+    trendBar.style.width = `${pathBasedValue}%`;
+  }
+  
+  // Update history values (show last 10 values)
+  const historyValuesElement = document.getElementById("historyValues");
+  if (historyValuesElement) {
+    const recentValues = congestionTrendsData.pathBased.slice(-10);
+    historyValuesElement.innerHTML = recentValues
+      .map(value => `<span class="history-value">${value.toFixed(1)}%</span>`)
+      .join('');
+  }
+}
+
+
+// Reset congestion trends data
+function resetCongestionTrends() {
+  congestionTrendsData = {
+    timestamps: [],
+    pathBased: []
+  };
+  
+  // Reset display elements
+  const currentValueElement = document.getElementById("currentCongestionValue");
+  if (currentValueElement) {
+    currentValueElement.textContent = "0%";
+    currentValueElement.style.color = "#007bff";
+  }
+  
+  const trendBar = document.getElementById("congestionTrendBar");
+  if (trendBar) {
+    trendBar.style.width = "0%";
+  }
+  
+  const historyValuesElement = document.getElementById("historyValues");
+  if (historyValuesElement) {
+    historyValuesElement.innerHTML = "";
+  }
+}
+
 // Reset efficiency display to zero values
 function resetEfficiencyDisplay() {
   // Reset chart
@@ -227,7 +389,6 @@ function resetEfficiencyDisplay() {
   updateMetric("totalFlows", 0);
   updateMetric("loadBalancedFlows", 0);
   updateMetric("loadBalancingRate", "0%");
-  updateMetric("congestionAvoidanceRate", "0 flows");
   updateMetric("congestionAvoidancePercentage", "0%");
   updateMetric("totalReroutes", 0);
   updateMetric("varianceImprovement", "0%");
@@ -236,6 +397,9 @@ function resetEfficiencyDisplay() {
   updateMetric("avgPathLengthSP", "0");
   updateMetric("runtime", "0 min");
   updateMetric("efficiencyScore", "0%");
+  
+  // Reset congestion trends
+  resetCongestionTrends();
   
   console.log("Efficiency display reset to zero values");
 }
@@ -255,6 +419,7 @@ function listenForModeChanges() {
 document.addEventListener('DOMContentLoaded', function() {
   if (document.getElementById("efficiencyChart")) {
     initEfficiencyChart();
+    initCongestionTrendsChart(); // This will check if the canvas exists internally
     updateEfficiencyMetrics();
     updateAlgorithmInfo();
     listenForModeChanges();

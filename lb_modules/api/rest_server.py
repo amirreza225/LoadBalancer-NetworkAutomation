@@ -138,9 +138,13 @@ class LBRestController(ControllerBase):
             total_events = getattr(self.lb, 'total_congestion_avoidance_events', 0)
             unique_flows = len(getattr(self.lb, 'flows_with_congestion_avoidance', set()))
             
+            # Simple approach: use flows that encountered congested baselines as denominator
+            flows_with_congested_baseline = len(getattr(self.lb, 'flows_with_congested_baseline', set()))
+            
             stats['congestion_avoidance_percentage'] = stats.get('congestion_avoidance_rate', 0)
             stats['total_congestion_avoidance_events'] = total_events
             stats['unique_flows_with_congestion_avoidance'] = unique_flows
+            stats['flows_with_congested_baseline'] = flows_with_congested_baseline
         else:
             # Fallback to direct calculation
             now = time.time()
@@ -161,13 +165,40 @@ class LBRestController(ControllerBase):
                 'avg_path_length_sp': self.lb.efficiency_metrics.get('avg_path_length_sp', 0)
             }
         
-        # Add congestion avoidance percentage calculation for dashboard
+        # Add additional event details for dashboard (percentage already calculated correctly by efficiency tracker)
         total_events = getattr(self.lb, 'total_congestion_avoidance_events', 0)
         unique_flows = len(getattr(self.lb, 'flows_with_congestion_avoidance', set()))
+        flows_with_congested_baseline = len(getattr(self.lb, 'flows_with_congested_baseline', set()))
         
-        stats['congestion_avoidance_percentage'] = stats['congestion_avoidance_rate']
+        # Add enhanced path-based congestion avoidance metrics if available
+        if hasattr(self.lb, 'efficiency_tracker') and hasattr(self.lb.efficiency_tracker, 'path_calculator'):
+            import time
+            now = time.time()
+            path_calc = self.lb.efficiency_tracker.path_calculator
+            
+            # Enhanced calculations
+            stats['enhanced_path_congestion_avoidance'] = path_calc.calculate_path_congestion_avoidance(now)
+            stats['enhanced_weighted_path_congestion_avoidance'] = path_calc.calculate_weighted_path_congestion_avoidance(now)
+            stats['enhanced_binary_path_congestion_avoidance'] = path_calc.calculate_binary_path_state(now)
+            
+            # Configuration information for dashboard
+            stats['congestion_calculation_config'] = path_calc.get_enhanced_configuration()
+            
+            # Algorithm metadata
+            stats['algorithm_version'] = '2.0-enhanced'
+            stats['algorithm_features'] = [
+                'gradient_based_scoring',
+                'temporal_trend_analysis', 
+                'application_aware_prioritization',
+                'multi_objective_optimization',
+                'adaptive_thresholds'
+            ]
+        
+        # Use the correctly calculated time-based percentage from efficiency tracker
+        stats['congestion_avoidance_percentage'] = stats.get('congestion_avoidance_rate', 0)
         stats['total_congestion_avoidance_events'] = total_events
         stats['unique_flows_with_congestion_avoidance'] = unique_flows
+        stats['flows_with_congested_baseline'] = flows_with_congested_baseline
         
         return self._cors(json.dumps(stats))
     
@@ -343,6 +374,59 @@ class LBRestController(ControllerBase):
             }
         
         return self._cors(json.dumps(stats))
+    
+    @route('enhanced_config', '/config/enhanced', methods=['GET'])
+    def get_enhanced_config(self, req, **_):
+        """Get enhanced congestion avoidance calculation configuration"""
+        if (hasattr(self.lb, 'efficiency_tracker') and 
+            hasattr(self.lb.efficiency_tracker, 'path_calculator')):
+            config = self.lb.efficiency_tracker.path_calculator.get_enhanced_configuration()
+            return self._cors(json.dumps(config))
+        else:
+            return self._cors(json.dumps({'error': 'Enhanced calculator not available'}), 404)
+    
+    @route('enhanced_config_update', '/config/enhanced', methods=['POST'])
+    def update_enhanced_config(self, req, **_):
+        """Update enhanced congestion avoidance calculation weights"""
+        try:
+            if not (hasattr(self.lb, 'efficiency_tracker') and 
+                   hasattr(self.lb.efficiency_tracker, 'path_calculator')):
+                return self._cors(json.dumps({'error': 'Enhanced calculator not available'}), 404)
+            
+            data = json.loads(req.body.decode('utf-8'))
+            path_calc = self.lb.efficiency_tracker.path_calculator
+            
+            # Update configuration weights if provided
+            if 'utilization_weight' in data:
+                path_calc.config['utilization_weight'] = float(data['utilization_weight'])
+            if 'trend_weight' in data:
+                path_calc.config['trend_weight'] = float(data['trend_weight'])
+            if 'capacity_weight' in data:
+                path_calc.config['capacity_weight'] = float(data['capacity_weight'])
+            if 'latency_weight' in data:
+                path_calc.config['latency_weight'] = float(data['latency_weight'])
+            if 'reliability_weight' in data:
+                path_calc.config['reliability_weight'] = float(data['reliability_weight'])
+            
+            # Validate weights sum to approximately 1.0
+            total_weight = (path_calc.config['utilization_weight'] + 
+                          path_calc.config['trend_weight'] + 
+                          path_calc.config['capacity_weight'] + 
+                          path_calc.config['latency_weight'] + 
+                          path_calc.config['reliability_weight'])
+            
+            if abs(total_weight - 1.0) > 0.1:
+                return self._cors(json.dumps({'error': f'Weights must sum to approximately 1.0, got {total_weight}'}), 400)
+            
+            self.lb.logger.info("Enhanced calculation weights updated: util=%.2f, trend=%.2f, capacity=%.2f, latency=%.2f, reliability=%.2f", 
+                              path_calc.config['utilization_weight'], path_calc.config['trend_weight'],
+                              path_calc.config['capacity_weight'], path_calc.config['latency_weight'], 
+                              path_calc.config['reliability_weight'])
+            
+            return self._cors(json.dumps({'success': True, 'new_config': path_calc.get_enhanced_configuration()}))
+        
+        except Exception as e:
+            return self._cors(json.dumps({'error': str(e)}), 400)
     
     @route('options', '/{path:.*}', methods=['OPTIONS'])
     def options_handler(self, req, **_):

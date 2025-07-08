@@ -237,6 +237,28 @@ class TrafficMonitor:
         congestion_detected = old_path_congested
         
         if congestion_detected:
+            # Track this flow as having encountered a congested baseline path
+            if hasattr(self.parent_app, 'flows_with_congested_baseline'):
+                # Convert flow_key to consistent format for tracking
+                consistent_flow_key = flow_key
+                if isinstance(flow_key, tuple) and len(flow_key) == 2:
+                    src_id, dst_id = flow_key
+                    if not (isinstance(src_id, str) and src_id.startswith('00:00:00')):
+                        # Convert DPID to MAC addresses for consistency
+                        src_mac = dst_mac = None
+                        for mac, dpid in self.parent_app.mac_to_dpid.items():
+                            if dpid == src_id:
+                                src_mac = mac
+                            elif dpid == dst_id:
+                                dst_mac = mac
+                        
+                        if src_mac and dst_mac:
+                            consistent_flow_key = (src_mac, dst_mac)
+                
+                self.parent_app.flows_with_congested_baseline.add(consistent_flow_key)
+                self.logger.info("TRACKING (reroute): Flow %s has congested baseline path, total with congested baseline: %d", 
+                               consistent_flow_key, len(self.parent_app.flows_with_congested_baseline))
+            
             # Calculate path costs
             old_cost = self._calculate_path_cost(old_path, cost)
             new_cost = self._calculate_path_cost(new_path, cost)
@@ -308,6 +330,8 @@ class TrafficMonitor:
                         # Track rerouting congestion avoidance with time-based re-counting
                         if reroute_flow_key:
                             now = time.time()
+                            
+                            # (Removed 10-second window tracking - keeping it simple)
                             
                             # Initialize congestion avoidance tracking if not present
                             if not hasattr(self.parent_app, 'congestion_avoidance_events'):

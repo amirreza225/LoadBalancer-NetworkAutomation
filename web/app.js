@@ -265,9 +265,4 @@ window.onload = () => {
   initChart();
   updateChart();
   setInterval(updateChart, POLL_INTERVAL);
-  
-  // Initialize topology visualization
-  if (typeof initTopology === 'function') {
-    initTopology();
-  }
 };
