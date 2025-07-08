@@ -1,6 +1,13 @@
 const linkThreshold = { low: 0.3, high: 1.0 };
 const THRESH_DEFAULT = 1000000;
-// API constant is already declared in app.js
+// API constant - use the one from app.js or default
+const API = window.API || "http://localhost:8080";
+
+// Error tracking and retry logic
+let topologyErrorCount = 0;
+let lastTopologyError = null;
+const MAX_TOPOLOGY_ERRORS = 3;
+const TOPOLOGY_RETRY_DELAY = 5000; // 5 seconds
 
 // Dynamic topology data - will be populated from API
 let nodes = [];
@@ -45,6 +52,11 @@ function initTopology() {
 async function checkTopologyChanges() {
   try {
     const response = await fetch(`${API}/topology`);
+    
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    
     const newTopologyData = await response.json();
 
     if (newTopologyData.nodes && newTopologyData.links) {
@@ -53,9 +65,28 @@ async function checkTopologyChanges() {
         console.log("Topology changed, updating visualization...");
         updateTopology(newTopologyData);
       }
+      
+      // Reset error count on successful fetch
+      topologyErrorCount = 0;
+      lastTopologyError = null;
+      updateTopologyStatus('ok');
+    } else {
+      console.warn("Topology API returned invalid data:", newTopologyData);
     }
   } catch (error) {
-    console.error("Error checking topology changes:", error);
+    topologyErrorCount++;
+    lastTopologyError = error;
+    
+    console.error(`Error checking topology changes (${topologyErrorCount}/${MAX_TOPOLOGY_ERRORS}):`, error);
+    
+    // If we have persistent errors, try to recover
+    if (topologyErrorCount >= MAX_TOPOLOGY_ERRORS) {
+      console.warn("Too many topology errors, attempting recovery...");
+      updateTopologyStatus('error', 'Connection Failed');
+      setTimeout(attemptTopologyRecovery, TOPOLOGY_RETRY_DELAY);
+    } else {
+      updateTopologyStatus('warning', `Error ${topologyErrorCount}/${MAX_TOPOLOGY_ERRORS}`);
+    }
   }
 }
 
@@ -112,10 +143,22 @@ async function updateTopology(topologyData = null) {
   try {
     if (!topologyData) {
       const response = await fetch(`${API}/topology`);
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      
       topologyData = await response.json();
     }
 
     if (topologyData.nodes && topologyData.links) {
+      // Validate topology data structure
+      const validatedData = validateTopologyData(topologyData);
+      if (!validatedData.valid) {
+        console.warn("Topology data validation failed:", validatedData.errors);
+        return;
+      }
+      
       // Update nodes and links
       nodes = topologyData.nodes;
       links = topologyData.links;
@@ -155,9 +198,16 @@ async function updateTopology(topologyData = null) {
           hostNodes.map((h) => h.id)
         );
       }
+    } else {
+      console.warn("Invalid topology data received:", topologyData);
     }
   } catch (error) {
     console.error("Error fetching topology:", error);
+    
+    // Don't retry immediately on fetch errors - let the regular interval handle it
+    if (topologyErrorCount < MAX_TOPOLOGY_ERRORS) {
+      console.log("Will retry topology fetch on next interval");
+    }
   }
 }
 
@@ -231,27 +281,35 @@ function updateVisualization() {
 async function updateLinkColors() {
   try {
     const response = await fetch(`${API}/load/links`);
+    
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    
     const stats = await response.json();
 
-    gLink.selectAll("line").attr("stroke", (d) => {
-      // Only color switch-to-switch links based on traffic
-      if (d.type !== "switch-switch") {
-        return d.type === "host-switch" ? "#666" : "#999";
-      }
+    if (gLink && gLink.selectAll) {
+      gLink.selectAll("line").attr("stroke", (d) => {
+        // Only color switch-to-switch links based on traffic
+        if (d.type !== "switch-switch") {
+          return d.type === "host-switch" ? "#666" : "#999";
+        }
 
-      // Extract switch IDs from node IDs (e.g., "s1" -> "1")
-      const sourceId = (d.source.id || d.source).replace("s", "");
-      const targetId = (d.target.id || d.target).replace("s", "");
+        // Extract switch IDs from node IDs (e.g., "s1" -> "1")
+        const sourceId = (d.source.id || d.source).replace("s", "");
+        const targetId = (d.target.id || d.target).replace("s", "");
 
-      // Try both directions for the link key
-      const key1 = `${sourceId}-${targetId}`;
-      const key2 = `${targetId}-${sourceId}`;
-      const bps = stats[key1] || stats[key2] || 0;
+        // Try both directions for the link key
+        const key1 = `${sourceId}-${targetId}`;
+        const key2 = `${targetId}-${sourceId}`;
+        const bps = stats[key1] || stats[key2] || 0;
 
-      return linkColor(bps);
-    });
+        return linkColor(bps);
+      });
+    }
   } catch (error) {
     console.error("Error updating link colors:", error);
+    // Don't stop the visualization if link colors fail
   }
 }
 
@@ -281,8 +339,121 @@ function drag(simulation) {
     .on("end", dragended);
 }
 
+// Validate topology data structure
+function validateTopologyData(data) {
+  const errors = [];
+  
+  if (!data.nodes || !Array.isArray(data.nodes)) {
+    errors.push("Missing or invalid nodes array");
+  }
+  
+  if (!data.links || !Array.isArray(data.links)) {
+    errors.push("Missing or invalid links array");
+  }
+  
+  // Check for required node properties
+  if (data.nodes) {
+    data.nodes.forEach((node, index) => {
+      if (!node.id) {
+        errors.push(`Node ${index} missing id`);
+      }
+      if (!node.type) {
+        errors.push(`Node ${index} missing type`);
+      }
+    });
+  }
+  
+  // Check for required link properties
+  if (data.links) {
+    data.links.forEach((link, index) => {
+      if (!link.source) {
+        errors.push(`Link ${index} missing source`);
+      }
+      if (!link.target) {
+        errors.push(`Link ${index} missing target`);
+      }
+    });
+  }
+  
+  return {
+    valid: errors.length === 0,
+    errors: errors
+  };
+}
+
+// Attempt topology recovery after persistent errors
+function attemptTopologyRecovery() {
+  console.log("Attempting topology recovery...");
+  
+  // Reset error count
+  topologyErrorCount = 0;
+  lastTopologyError = null;
+  
+  // Clear existing visualization
+  if (gLink) {
+    gLink.selectAll("*").remove();
+  }
+  if (gNode) {
+    gNode.selectAll("*").remove();
+  }
+  
+  // Reinitialize topology
+  setTimeout(() => {
+    console.log("Reinitializing topology visualization...");
+    initTopology();
+  }, 1000);
+}
+
+// Add topology status indicator
+function updateTopologyStatus(status, message = '') {
+  // Create status indicator if it doesn't exist
+  let statusIndicator = document.getElementById('topology-status');
+  if (!statusIndicator) {
+    statusIndicator = document.createElement('div');
+    statusIndicator.id = 'topology-status';
+    statusIndicator.style.cssText = `
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      padding: 5px 10px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: bold;
+      z-index: 1000;
+    `;
+    document.querySelector('svg').parentNode.appendChild(statusIndicator);
+  }
+  
+  // Update status
+  switch (status) {
+    case 'ok':
+      statusIndicator.textContent = 'Topology: OK';
+      statusIndicator.style.backgroundColor = '#28a745';
+      statusIndicator.style.color = 'white';
+      break;
+    case 'warning':
+      statusIndicator.textContent = `Topology: ${message}`;
+      statusIndicator.style.backgroundColor = '#ffc107';
+      statusIndicator.style.color = 'black';
+      break;
+    case 'error':
+      statusIndicator.textContent = `Topology: ${message}`;
+      statusIndicator.style.backgroundColor = '#dc3545';
+      statusIndicator.style.color = 'white';
+      break;
+  }
+}
+
 // Initialize when DOM is loaded
 document.addEventListener("DOMContentLoaded", function () {
   // Initialize topology visualization
   initTopology();
+  
+  // Set up error monitoring
+  window.addEventListener('error', (event) => {
+    if (event.filename && event.filename.includes('topology.js')) {
+      console.error('Topology visualization error:', event.error);
+      updateTopologyStatus('error', 'Visualization Error');
+    }
+  });
 });

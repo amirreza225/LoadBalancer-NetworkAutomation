@@ -161,33 +161,25 @@ class LoadBalancerREST(app_manager.RyuApp):
         if eth.src not in self.mac_to_dpid:
             self.mac_to_dpid[eth.src] = dpid
             
-        # Simplified host discovery with hexring priority
+        # Simplified host discovery - consistent naming without priority overrides
         if self._is_host_mac(eth.src) and self._is_host_port(dpid, in_port):
             # Always proceed with host discovery - don't block on topology readiness
             if eth.src not in self.hosts:
                 host_name = self._get_proper_host_name(eth.src, dpid)
-                is_hexring_mac = self._is_hexring_mac(eth.src)
                 
-                # Handle hexring MACs with priority (can override existing assignments)
-                if is_hexring_mac and host_name:
-                    host_num = int(host_name[1:])  # Extract number from h1, h2, etc.
-                    if 1 <= host_num <= 6:
-                        self._handle_hexring_host_discovery(eth.src, host_name, dpid, in_port)
-                        return
-                        
-                # Handle non-hexring MACs (avoid conflicts)
-                elif host_name:
+                # Use proper naming if available, otherwise use sequential counter
+                if host_name:
                     # Check if this host name is already taken
                     existing_mac = self._find_host_by_name(host_name)
                     if existing_mac:
-                        # Don't override existing assignments for non-hexring MACs
-                        self.logger.debug("Host name %s already taken by MAC %s, ignoring MAC %s", 
+                        # Don't override existing assignments - use sequential naming instead
+                        self.logger.debug("Host name %s already taken by MAC %s, using sequential naming for MAC %s", 
                                         host_name, existing_mac, eth.src)
-                        return
+                        self.host_counter += 1
+                        host_name = f"h{self.host_counter}"
                     
-                    # Assign new host
-                    self.hosts[eth.src] = host_name
-                    self.host_locations.setdefault(dpid, set()).add(eth.src)
+                    # Assign the host (either proper name or sequential)
+                    self._assign_host_atomically(eth.src, host_name, dpid)
                     self.logger.info("Discovered host %s (MAC: %s) at switch %s port %s", 
                                    host_name, eth.src, dpid, in_port)
                     
@@ -195,8 +187,7 @@ class LoadBalancerREST(app_manager.RyuApp):
                 else:
                     self.host_counter += 1
                     host_name = f"h{self.host_counter}"
-                    self.hosts[eth.src] = host_name
-                    self.host_locations.setdefault(dpid, set()).add(eth.src)
+                    self._assign_host_atomically(eth.src, host_name, dpid)
                     self.logger.info("Discovered host %s (MAC: %s) at switch %s port %s", 
                                    host_name, eth.src, dpid, in_port)
         
@@ -1032,6 +1023,14 @@ class LoadBalancerREST(app_manager.RyuApp):
         """
         if not self.topology_ready:
             return
+        
+        # Periodic cleanup of spurious hosts (every 30 seconds)
+        if hasattr(self, '_last_cleanup_time'):
+            if now - self._last_cleanup_time > 30:
+                self._cleanup_spurious_hosts()
+                self._last_cleanup_time = now
+        else:
+            self._last_cleanup_time = now
             
         cost = self._calculate_link_costs(now)
         for fid, old_path in list(self.flow_paths.items()):
@@ -1251,7 +1250,8 @@ class LoadBalancerREST(app_manager.RyuApp):
     
     def _is_host_mac(self, mac):
         """
-        Determine if a MAC address belongs to a host (heuristic).
+        Determine if a MAC address belongs to a legitimate host.
+        Now more restrictive to prevent spurious host discovery.
         """
         # Filter out broadcast, multicast, and special protocol MACs
         if mac == "ff:ff:ff:ff:ff:ff":  # Broadcast
@@ -1268,8 +1268,10 @@ class LoadBalancerREST(app_manager.RyuApp):
         # Check if it's a typical host MAC (not all zeros or ones)
         if mac in ["00:00:00:00:00:00", "11:11:11:11:11:11"]:
             return False
-            
-        return True
+        
+        # Only accept MACs that match known topology patterns
+        # This prevents random/temporary MACs from being treated as hosts
+        return self._is_known_topology_mac(mac)
     
     def _get_proper_host_name(self, mac, dpid):
         """
@@ -1308,22 +1310,58 @@ class LoadBalancerREST(app_manager.RyuApp):
     def _is_host_port(self, dpid, port):
         """
         Determine if a port is likely connected to a host (not inter-switch).
+        More restrictive to prevent spurious host discovery.
         """
         # Check if this port is used for inter-switch links
         if dpid in self.adj:
             inter_switch_ports = set(self.adj[dpid].values())
-            return port not in inter_switch_ports
-        return True  # If topology not ready, assume it could be a host port
+            is_host_port = port not in inter_switch_ports
+            
+            # Additional check: ensure it's a reasonable host port number
+            # Most topologies use ports 1-4 for hosts
+            if is_host_port and 1 <= port <= 6:
+                return True
+            elif is_host_port:
+                # Log suspicious port numbers but still allow them for now
+                self.logger.debug("Host discovered on unusual port: switch %d port %d", dpid, port)
+                return True
+            else:
+                return False
+        
+        # If topology not ready, be more conservative
+        # Only allow typical host ports (1-4)
+        return 1 <= port <= 4
     
-    def _is_hexring_mac(self, mac):
+    def _is_known_topology_mac(self, mac):
         """
-        Determine if a MAC address is a valid hexring topology MAC.
+        Determine if a MAC address is from a known topology (hexring or generic).
+        More restrictive to prevent spurious host discovery.
         """
+        # Hexring topology MACs (exact match)
         hexring_macs = {
             "00:00:00:00:00:01", "00:00:00:00:00:02", "00:00:00:00:00:03",
             "00:00:00:00:00:04", "00:00:00:00:00:05", "00:00:00:00:00:06"
         }
-        return mac in hexring_macs
+        
+        # Generic topology MACs (pattern-based, more restrictive)
+        if mac in hexring_macs:
+            return True
+        
+        # Check for sequential MAC pattern used in generic topologies
+        # Only accept the standard Mininet pattern: 00:00:00:00:00:XX
+        if mac.startswith("00:00:00:00:00:") and len(mac) == 17:
+            try:
+                # Extract the last octet
+                last_octet = mac.split(":")[5]
+                if len(last_octet) <= 2:  # Valid hex format
+                    mac_num = int(last_octet, 16)
+                    # Only accept reasonable host numbers (1-50)
+                    # This prevents random MACs from being treated as hosts
+                    return 1 <= mac_num <= 50
+            except ValueError:
+                pass
+        
+        return False
     
     def _find_host_by_name(self, host_name):
         """
@@ -1334,184 +1372,137 @@ class LoadBalancerREST(app_manager.RyuApp):
                 return mac
         return None
     
-    def _handle_hexring_host_discovery(self, mac, host_name, dpid, in_port):
+    def _assign_host_atomically(self, mac, host_name, dpid):
         """
-        Handle discovery of a hexring MAC with priority override capability.
+        Atomically assign a host to ensure data structure consistency.
         """
-        existing_mac = self._find_host_by_name(host_name)
-        
-        if existing_mac and existing_mac != mac:
-            # Hexring MAC takes priority - remove the existing assignment
-            self.logger.info("🔄 Hexring MAC priority: %s takes over host name %s from %s", 
-                           mac, host_name, existing_mac)
-            
-            # Clean up old host assignment
-            old_dpid = self.mac_to_dpid.get(existing_mac)
-            if old_dpid and old_dpid in self.host_locations:
-                self.host_locations[old_dpid].discard(existing_mac)
-            
-            # Remove from hosts dictionary
-            if existing_mac in self.hosts:
-                del self.hosts[existing_mac]
-            
-            # Clean up flows involving the old MAC
-            self._cleanup_flows_for_mac(existing_mac)
-            
-            # Remove old MAC from mac_to_dpid if it's not used elsewhere
-            if existing_mac in self.mac_to_dpid:
-                del self.mac_to_dpid[existing_mac]
-            
-            self.logger.info("Cleaned up old assignment for %s (MAC: %s)", host_name, existing_mac)
-        
-        # Assign or reassign the hexring MAC
+        # Update all three data structures atomically
         self.hosts[mac] = host_name
         self.host_locations.setdefault(dpid, set()).add(mac)
         
-        self.logger.info("✅ Hexring host %s (MAC: %s) discovered at switch %s port %s", 
-                       host_name, mac, dpid, in_port)
-        
-        # Trigger flow revalidation if topology is ready
-        if self.topology_ready:
-            self._revalidate_flows_after_host_change()
+        # mac_to_dpid should already be set from MAC learning, but ensure consistency
+        if mac not in self.mac_to_dpid:
+            self.mac_to_dpid[mac] = dpid
+        elif self.mac_to_dpid[mac] != dpid:
+            # MAC moved to a different switch - update location
+            old_dpid = self.mac_to_dpid[mac]
+            if old_dpid in self.host_locations:
+                self.host_locations[old_dpid].discard(mac)
+            self.mac_to_dpid[mac] = dpid
+            self.logger.info("Host %s (MAC: %s) moved from switch %s to switch %s", 
+                           host_name, mac, old_dpid, dpid)
     
-    def _cleanup_flows_for_mac(self, mac):
+    def _validate_host_consistency(self):
         """
-        Clean up flows that involve a specific MAC address.
+        Validate consistency between host tracking data structures.
         """
-        flows_to_remove = []
-        for (src, dst), path in self.flow_paths.items():
-            if src == mac or dst == mac:
-                flows_to_remove.append((src, dst))
+        inconsistencies = []
         
-        for flow_id in flows_to_remove:
-            del self.flow_paths[flow_id]
-            self.logger.debug("Removed flow for old MAC: %s → %s", flow_id[0], flow_id[1])
-        
-        return len(flows_to_remove)
-    
-    def _revalidate_flows_after_host_change(self):
-        """
-        Enhanced flow revalidation with automatic recovery for proper hexring hosts.
-        """
-        flows_cleaned = len(self.flow_paths)
-        
-        if flows_cleaned > 0:
-            self.logger.info("🔄 Revalidating %d flows after host discovery changes", flows_cleaned)
-            
-            # Reset efficiency metrics since topology changed
-            self.efficiency_metrics['total_flows'] = max(0, self.efficiency_metrics['total_flows'] - flows_cleaned)
-            self.efficiency_metrics['load_balanced_flows'] = max(0, self.efficiency_metrics['load_balanced_flows'])
-            self.efficiency_metrics['congestion_avoided'] = max(0, self.efficiency_metrics['congestion_avoided'])
-        
-        # Trigger automatic flow recovery if we have proper hexring topology
-        if self.topology_ready:
-            self._trigger_flow_recovery()
-    
-    def _trigger_flow_recovery(self):
-        """
-        Automatically recreate flows between discovered hexring hosts.
-        """
-        hexring_macs = {"00:00:00:00:00:01", "00:00:00:00:00:02", "00:00:00:00:00:03", 
-                       "00:00:00:00:00:04", "00:00:00:00:00:05", "00:00:00:00:00:06"}
-        
-        # Get current hexring hosts
-        hexring_hosts = {}
+        # Check hosts dict consistency with mac_to_dpid
         for mac, host_name in self.hosts.items():
-            if mac in hexring_macs:
-                hexring_hosts[host_name] = mac
+            if mac not in self.mac_to_dpid:
+                inconsistencies.append(f"Host {host_name} (MAC: {mac}) missing from mac_to_dpid")
         
-        if len(hexring_hosts) >= 2:  # Need at least 2 hosts for flow creation
-            self.logger.info("🔧 Flow recovery: %d hexring hosts detected, enabling auto-flow creation", 
-                           len(hexring_hosts))
+        # Check host_locations consistency with hosts dict
+        for dpid, macs in self.host_locations.items():
+            for mac in macs:
+                if mac not in self.hosts:
+                    inconsistencies.append(f"MAC {mac} at switch {dpid} missing from hosts dict")
+                elif self.mac_to_dpid.get(mac) != dpid:
+                    inconsistencies.append(f"MAC {mac} location mismatch: hosts_locations says {dpid}, mac_to_dpid says {self.mac_to_dpid.get(mac)}")
+        
+        # Check mac_to_dpid consistency with host_locations
+        for mac, dpid in self.mac_to_dpid.items():
+            if mac in self.hosts:  # Only check hosts, not all MACs
+                if dpid not in self.host_locations or mac not in self.host_locations[dpid]:
+                    inconsistencies.append(f"Host MAC {mac} at switch {dpid} missing from host_locations")
+        
+        if inconsistencies:
+            self.logger.warning("Host consistency issues found: %s", inconsistencies)
+            return False
+        
+        return True
+    
+    def _get_host_status_summary(self):
+        """
+        Get a summary of host status for debugging and monitoring.
+        """
+        status_summary = {
+            'total_hosts': len(self.hosts),
+            'hosts_with_location': 0,
+            'hosts_with_mac_mapping': 0,
+            'known_topology_hosts': 0,
+            'inconsistent_hosts': []
+        }
+        
+        # Analyze each host
+        for mac, host_name in self.hosts.items():
+            # Check if host has proper location tracking
+            if mac in self.mac_to_dpid:
+                dpid = self.mac_to_dpid[mac]
+                if dpid in self.host_locations and mac in self.host_locations[dpid]:
+                    status_summary['hosts_with_location'] += 1
+                else:
+                    status_summary['inconsistent_hosts'].append(f"{host_name} (MAC: {mac}) missing from host_locations")
             
-            # Enable proactive flow creation between hexring hosts
-            self._create_hexring_flows(hexring_hosts)
+            # Check if host has MAC mapping
+            if mac in self.mac_to_dpid:
+                status_summary['hosts_with_mac_mapping'] += 1
+            else:
+                status_summary['inconsistent_hosts'].append(f"{host_name} (MAC: {mac}) missing from mac_to_dpid")
+            
+            # Check if host is from known topology
+            if self._is_known_topology_mac(mac):
+                status_summary['known_topology_hosts'] += 1
+        
+        return status_summary
     
-    def _create_hexring_flows(self, hexring_hosts):
+    def _cleanup_spurious_hosts(self):
         """
-        Proactively create flows between hexring hosts to enable load balancing.
+        Clean up hosts that don't match known topology patterns.
+        This fixes the issue where too many hosts were discovered.
         """
-        host_macs = list(hexring_hosts.values())
-        flows_created = 0
+        spurious_hosts = []
         
-        if len(host_macs) < 2:
-            return flows_created
+        # Find hosts that don't match known topology patterns
+        for mac, host_name in list(self.hosts.items()):
+            if not self._is_known_topology_mac(mac):
+                spurious_hosts.append((mac, host_name))
         
-        # Calculate current costs for path selection
-        cost = self._calculate_link_costs(time.time())
-        
-        # Create flows between first few pairs to establish topology understanding
-        for i in range(min(3, len(host_macs))):  # Limit to first 3 hosts to avoid flooding
-            for j in range(i + 1, min(i + 3, len(host_macs))):  # Create limited connections
-                src_mac = host_macs[i]
-                dst_mac = host_macs[j]
-                
-                # Skip if flow already exists
-                if (src_mac, dst_mac) in self.flow_paths or (dst_mac, src_mac) in self.flow_paths:
-                    continue
-                
-                # Get switch locations
-                src_dpid = self.mac_to_dpid.get(src_mac)
-                dst_dpid = self.mac_to_dpid.get(dst_mac)
-                
-                if src_dpid and dst_dpid and src_dpid != dst_dpid:
-                    # Find and install path
-                    path = self._find_path(src_dpid, dst_dpid, cost)
-                    if path:
-                        self._install_path(path, src_mac, dst_mac)
-                        self.flow_paths[(src_mac, dst_mac)] = path
-                        
-                        src_name = self.hosts.get(src_mac, src_mac[-6:])
-                        dst_name = self.hosts.get(dst_mac, dst_mac[-6:])
-                        self.logger.info("🔧 Flow recovery: created flow %s→%s path %s", 
-                                       src_name, dst_name, path)
-                        
-                        # Update efficiency metrics for recovered flow
-                        self._update_flow_metrics(src_dpid, dst_dpid, path, cost)
-                        flows_created += 1
-        
-        if flows_created > 0:
-            self.logger.info("✅ Flow recovery complete: created %d flows between hexring hosts", 
-                           flows_created)
-        
-        return flows_created
-    
-    def _force_hexring_discovery(self):
-        """
-        Force discovery and validation of hexring topology (for admin use).
-        """
-        hexring_macs = {"00:00:00:00:00:01", "00:00:00:00:00:02", "00:00:00:00:00:03", 
-                       "00:00:00:00:00:04", "00:00:00:00:00:05", "00:00:00:00:00:06"}
-        
-        # Clear any non-hexring hosts
-        non_hexring_macs = set(self.hosts.keys()) - hexring_macs
-        
-        for mac in list(non_hexring_macs):
+        # Remove spurious hosts
+        for mac, host_name in spurious_hosts:
+            self.logger.info("Removing spurious host %s (MAC: %s) - not from known topology", 
+                           host_name, mac)
+            
+            # Clean up from all data structures
             if mac in self.hosts:
-                host_name = self.hosts[mac]
-                self.logger.info("🧹 Force cleanup: removing non-hexring host %s (MAC: %s)", 
-                               host_name, mac)
+                del self.hosts[mac]
+            
+            if mac in self.mac_to_dpid:
+                dpid = self.mac_to_dpid[mac]
+                del self.mac_to_dpid[mac]
                 
-                # Clean up flows and data structures
-                self._cleanup_flows_for_mac(mac)
-                
-                old_dpid = self.mac_to_dpid.get(mac)
-                if old_dpid and old_dpid in self.host_locations:
-                    self.host_locations[old_dpid].discard(mac)
-                
-                if mac in self.hosts:
-                    del self.hosts[mac]
-                if mac in self.mac_to_dpid:
-                    del self.mac_to_dpid[mac]
+                # Remove from host_locations
+                if dpid in self.host_locations:
+                    self.host_locations[dpid].discard(mac)
+                    if not self.host_locations[dpid]:  # Remove empty sets
+                        del self.host_locations[dpid]
+            
+            # Clean up flows involving this host
+            flows_to_remove = []
+            for (src, dst), path in self.flow_paths.items():
+                if src == mac or dst == mac:
+                    flows_to_remove.append((src, dst))
+            
+            for flow_id in flows_to_remove:
+                del self.flow_paths[flow_id]
+                self.logger.debug("Removed flow involving spurious host: %s → %s", 
+                                flow_id[0], flow_id[1])
         
-        # Reset counter for clean state
-        self.host_counter = 0
-        
-        # Trigger flow recovery if topology is ready
-        if self.topology_ready:
-            self._trigger_flow_recovery()
-        
-        return len(non_hexring_macs)
+        if spurious_hosts:
+            self.logger.info("Cleaned up %d spurious hosts", len(spurious_hosts))
+            
+        return len(spurious_hosts)
     
     def _cleanup_stale_hosts(self):
         """
@@ -1810,16 +1801,17 @@ class LBRestController(ControllerBase):
         nodes = []
         links = []
         
-        # Debug logging for host tracking consistency
+        # Validate host consistency before building topology
+        consistency_ok = self.lb._validate_host_consistency()
+        if not consistency_ok:
+            self.lb.logger.warning("Host consistency issues detected, but continuing with topology API")
+        
+        # Debug logging for host tracking (less verbose)
         total_hosts_in_hosts_dict = len(self.lb.hosts)
         total_hosts_in_locations = sum(len(macs) for macs in self.lb.host_locations.values())
         
-        if total_hosts_in_hosts_dict != total_hosts_in_locations:
-            self.lb.logger.warning("Host tracking inconsistency: hosts dict=%d, host_locations=%d", 
-                                 total_hosts_in_hosts_dict, total_hosts_in_locations)
-            # Debug: show the actual data
-            self.lb.logger.debug("hosts dict: %s", list(self.lb.hosts.keys()))
-            self.lb.logger.debug("host_locations: %s", dict(self.lb.host_locations))
+        self.lb.logger.debug("Topology API: %d hosts in dict, %d hosts in locations", 
+                           total_hosts_in_hosts_dict, total_hosts_in_locations)
         
         # Add switch nodes with host count information
         for dpid in self.lb.dp_set.keys():
@@ -1830,27 +1822,32 @@ class LBRestController(ControllerBase):
                 "host_count": host_count
             })
         
-        # Add host nodes (only properly discovered hosts, deduplicated by name)
+        # Add host nodes with simplified filtering (more reliable)
         valid_hosts = {}
         added_host_names = set()
         
         for mac, host_name in self.lb.hosts.items():
-            # Simplified verification - just check if MAC is known and connected
+            # Simplified check - if host is in hosts dict, it should be shown
+            # Only skip if MAC is not in mac_to_dpid (truly invalid)
             if mac in self.lb.mac_to_dpid:
                 dpid = self.lb.mac_to_dpid[mac]
-                # Additional check: ensure the switch exists
-                if dpid in self.lb.dp_set:
-                    # Only add if we haven't seen this host name before
+                
+                # More lenient check - show host even if switch temporarily unavailable
+                if dpid in self.lb.dp_set or True:  # Always show hosts for better visibility
+                    # Only add if we haven't seen this host name before (avoid duplicates)
                     if host_name not in added_host_names:
                         nodes.append({"id": host_name, "type": "host", "mac": mac})
                         added_host_names.add(host_name)
                     valid_hosts[mac] = (host_name, dpid)
-                else:
-                    self.lb.logger.warning("Host %s (MAC: %s) references non-existent switch %d", 
-                                         host_name, mac, dpid)
+                    
+                    # Log missing switch but don't hide host
+                    if dpid not in self.lb.dp_set:
+                        self.lb.logger.debug("Host %s (MAC: %s) references switch %d not in dp_set, but showing anyway", 
+                                           host_name, mac, dpid)
             else:
-                self.lb.logger.warning("Host %s (MAC: %s) not found in mac_to_dpid", 
-                                     host_name, mac)
+                # Only warn about truly problematic cases
+                self.lb.logger.debug("Host %s (MAC: %s) not found in mac_to_dpid - may be transient", 
+                                   host_name, mac)
         
         # Add switch-to-switch links
         added_links = set()
@@ -1859,9 +1856,13 @@ class LBRestController(ControllerBase):
                 links.append({"source": f"s{u}", "target": f"s{v}", "type": "switch-switch"})
                 added_links.add((u, v))
         
-        # Add host-to-switch links (only for verified hosts)
+        # Add host-to-switch links (for all valid hosts)
         for mac, (host_name, dpid) in valid_hosts.items():
             links.append({"source": host_name, "target": f"s{dpid}", "type": "host-switch"})
+        
+        # Final topology summary
+        self.lb.logger.debug("Topology API returning: %d nodes (%d hosts), %d links", 
+                           len(nodes), len(valid_hosts), len(links))
         
         return self._cors(json.dumps({"nodes": nodes, "links": links}))
 
@@ -1883,6 +1884,48 @@ class LBRestController(ControllerBase):
             except Exception:
                 return self._cors(json.dumps({"error": "invalid threshold"}), 400)
         return self._cors(json.dumps({"threshold": self.lb.THRESHOLD_BPS}))
+
+    @route('debug_hosts', '/debug/hosts', methods=['GET'])
+    def debug_hosts(self, req, **_):
+        """Debug endpoint for host state monitoring."""
+        debug_info = {
+            "host_summary": self.lb._get_host_status_summary(),
+            "host_details": {},
+            "data_structures": {
+                "hosts_dict_size": len(self.lb.hosts),
+                "mac_to_dpid_size": len(self.lb.mac_to_dpid),
+                "host_locations_total": sum(len(macs) for macs in self.lb.host_locations.values()),
+                "host_locations_by_switch": {str(dpid): len(macs) for dpid, macs in self.lb.host_locations.items()}
+            }
+        }
+        
+        # Add detailed host information
+        for mac, host_name in self.lb.hosts.items():
+            dpid = self.lb.mac_to_dpid.get(mac)
+            debug_info["host_details"][host_name] = {
+                "mac": mac,
+                "switch_dpid": dpid,
+                "in_mac_to_dpid": mac in self.lb.mac_to_dpid,
+                "in_host_locations": dpid in self.lb.host_locations and mac in self.lb.host_locations[dpid] if dpid else False,
+                "switch_connected": dpid in self.lb.dp_set if dpid else False,
+                "known_topology": self.lb._is_known_topology_mac(mac)
+            }
+        
+        return self._cors(json.dumps(debug_info, indent=2))
+
+    @route('cleanup_hosts', '/debug/cleanup_hosts', methods=['POST'])
+    def cleanup_hosts(self, req, **_):
+        """Manual cleanup of spurious hosts."""
+        cleanup_count = self.lb._cleanup_spurious_hosts()
+        
+        result = {
+            "cleanup_performed": True,
+            "spurious_hosts_removed": cleanup_count,
+            "remaining_hosts": len(self.lb.hosts),
+            "host_list": list(self.lb.hosts.values())
+        }
+        
+        return self._cors(json.dumps(result, indent=2))
 
     @route('efficiency', '/stats/efficiency', methods=['GET'])
     def get_efficiency(self, req, **_):
