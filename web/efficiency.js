@@ -39,7 +39,7 @@ function initEfficiencyChart() {
   });
 }
 
-// Initialize congestion trends display using a simple progress bar approach
+// Initialize congestion trends chart with Chart.js
 function initCongestionTrendsChart() {
   const container = document.getElementById("congestionTrendsContainer");
   if (!container) {
@@ -47,20 +47,14 @@ function initCongestionTrendsChart() {
     return;
   }
   
-  // Create a simple real-time display instead of complex charts
+  // Create chart container
   container.innerHTML = `
     <div class="congestion-trends-display">
       <div class="trend-header">
-        <h4>Real-time Congestion Avoidance</h4>
+        <h4>Congestion Avoidance Trends</h4>
         <div class="current-value" id="currentCongestionValue">0%</div>
       </div>
-      <div class="trend-bar-container">
-        <div class="trend-bar" id="congestionTrendBar" style="width: 0%"></div>
-      </div>
-      <div class="trend-history" id="trendHistory">
-        <div class="history-label">Recent Values:</div>
-        <div class="history-values" id="historyValues"></div>
-      </div>
+      <canvas id="congestionTrendsChart" width="400" height="200"></canvas>
     </div>
     <style>
       .congestion-trends-display {
@@ -76,44 +70,90 @@ function initCongestionTrendsChart() {
         margin-bottom: 15px;
       }
       .current-value {
-        font-size: 2em;
+        font-size: 1.5em;
         font-weight: bold;
         color: #007bff;
       }
-      .trend-bar-container {
-        background: #f0f0f0;
-        border-radius: 10px;
-        height: 30px;
-        position: relative;
-        margin: 15px 0;
-      }
-      .trend-bar {
-        background: linear-gradient(90deg, #28a745, #007bff, #6f42c1);
-        height: 100%;
-        border-radius: 10px;
-        transition: width 0.5s ease;
-        position: relative;
-      }
-      .trend-history {
-        margin-top: 15px;
-      }
-      .history-label {
-        font-weight: bold;
-        margin-bottom: 5px;
-      }
-      .history-values {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-      }
-      .history-value {
-        background: #e9ecef;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-size: 0.9em;
+      #congestionTrendsChart {
+        max-height: 200px;
       }
     </style>
   `;
+  
+  // Initialize Chart.js line chart
+  const ctx = document.getElementById("congestionTrendsChart").getContext("2d");
+  congestionTrendsChart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: [],
+      datasets: [{
+        label: "Congestion Avoidance %",
+        data: [],
+        borderColor: "#28a745",
+        backgroundColor: "rgba(40, 167, 69, 0.15)",
+        fill: true,
+        tension: 0.4,
+        pointRadius: 4,
+        pointHoverRadius: 8,
+        borderWidth: 3
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: {
+          type: "time",
+          time: {
+            unit: "minute",
+            tooltipFormat: "HH:mm:ss",
+            displayFormats: {
+              minute: "HH:mm"
+            }
+          },
+          title: {
+            display: true,
+            text: "Time"
+          }
+        },
+        y: {
+          beginAtZero: true,
+          max: 100,
+          title: {
+            display: true,
+            text: "Avoidance Rate (%)"
+          },
+          ticks: {
+            callback: function(value) {
+              return value + "%";
+            }
+          }
+        }
+      },
+      plugins: {
+        title: {
+          display: true,
+          text: "Real-time Congestion Avoidance Trends"
+        },
+        legend: {
+          display: false
+        },
+        tooltip: {
+          mode: "index",
+          intersect: false,
+          callbacks: {
+            label: function(context) {
+              return context.dataset.label + ": " + context.parsed.y.toFixed(1) + "%";
+            }
+          }
+        }
+      },
+      interaction: {
+        mode: "nearest",
+        intersect: false
+      }
+    }
+  });
 }
 
 // Update efficiency metrics display
@@ -302,23 +342,27 @@ function calculateEfficiencyScore(metrics) {
   return finalScore;
 }
 
-// Update congestion trends display with new data
+// Update congestion trends chart with new data
 async function updateCongestionTrends(metrics) {
-  const container = document.getElementById("congestionTrendsContainer");
-  if (!container) return;
+  if (!congestionTrendsChart) return;
   
-  // Extract enhanced metrics if available
+  const now = new Date();
+  
+  // Extract main congestion avoidance metric
   const pathBasedValue = metrics.enhanced_path_congestion_avoidance || 0;
   
-  // Add new data point to history
-  congestionTrendsData.timestamps.push(new Date());
-  congestionTrendsData.pathBased.push(pathBasedValue);
+  // Add new data point
+  congestionTrendsChart.data.labels.push(now);
+  congestionTrendsChart.data.datasets[0].data.push(pathBasedValue);
   
   // Keep only last MAX_DATA_POINTS
-  if (congestionTrendsData.timestamps.length > MAX_DATA_POINTS) {
-    congestionTrendsData.timestamps.shift();
-    congestionTrendsData.pathBased.shift();
+  if (congestionTrendsChart.data.labels.length > MAX_DATA_POINTS) {
+    congestionTrendsChart.data.labels.shift();
+    congestionTrendsChart.data.datasets[0].data.shift();
   }
+  
+  // Update the chart
+  congestionTrendsChart.update('none'); // 'none' for better performance
   
   // Update current value display
   const currentValueElement = document.getElementById("currentCongestionValue");
@@ -333,46 +377,23 @@ async function updateCongestionTrends(metrics) {
       currentValueElement.style.color = "#dc3545"; // Red for low
     }
   }
-  
-  // Update progress bar
-  const trendBar = document.getElementById("congestionTrendBar");
-  if (trendBar) {
-    trendBar.style.width = `${pathBasedValue}%`;
-  }
-  
-  // Update history values (show last 10 values)
-  const historyValuesElement = document.getElementById("historyValues");
-  if (historyValuesElement) {
-    const recentValues = congestionTrendsData.pathBased.slice(-10);
-    historyValuesElement.innerHTML = recentValues
-      .map(value => `<span class="history-value">${value.toFixed(1)}%</span>`)
-      .join('');
-  }
 }
 
 
 // Reset congestion trends data
 function resetCongestionTrends() {
-  congestionTrendsData = {
-    timestamps: [],
-    pathBased: []
-  };
+  // Reset chart data
+  if (congestionTrendsChart) {
+    congestionTrendsChart.data.labels = [];
+    congestionTrendsChart.data.datasets[0].data = [];
+    congestionTrendsChart.update();
+  }
   
   // Reset display elements
   const currentValueElement = document.getElementById("currentCongestionValue");
   if (currentValueElement) {
     currentValueElement.textContent = "0%";
     currentValueElement.style.color = "#007bff";
-  }
-  
-  const trendBar = document.getElementById("congestionTrendBar");
-  if (trendBar) {
-    trendBar.style.width = "0%";
-  }
-  
-  const historyValuesElement = document.getElementById("historyValues");
-  if (historyValuesElement) {
-    historyValuesElement.innerHTML = "";
   }
 }
 
