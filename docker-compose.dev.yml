@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  sdn-load-balancer:
+    volumes:
+      # Additional development volumes
+      - ./:/app
+      # Override just the essential system mounts
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - /lib/modules:/lib/modules:ro
+    environment:
+      - TOPOLOGY=hexring
+      - SWITCHES=4
+      - THRESHOLD=25
+      - MODE=adaptive
+      - PYTHONPATH=/usr/local/lib/python3.8/site-packages:/usr/lib/python3/dist-packages:/usr/local/lib/python3.8/dist-packages:/app
+    command: /app/start_dev.sh
+    # Override restart policy for development
+    restart: "no"
+
+  # Quick development service without rebuilding
+  sdn-dev:
+    build: .
+    container_name: sdn-dev
+    privileged: true
+    volumes:
+      - ./:/app
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - /lib/modules:/lib/modules:ro
+    environment:
+      - TOPOLOGY=hexring
+      - SWITCHES=4
+      - THRESHOLD=25
+      - MODE=adaptive
+      - PYTHONPATH=/usr/local/lib/python3.8/site-packages:/usr/lib/python3/dist-packages:/usr/local/lib/python3.8/dist-packages:/app
+    ports:
+      - "8000:8000"  # Web dashboard
+      - "8080:8080"  # REST API
+      - "6653:6653"  # OpenFlow controller
+    command: /app/start_dev.sh
+    restart: "no"
+    stdin_open: true
+    tty: true

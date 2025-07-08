@@ -1,5 +1,6 @@
 // Configuration
 const API = "http://localhost:8080";
+window.API = API;  // Make API available globally
 const POLL_INTERVAL = 1000;   // ms
 const MAX_POINTS = 20;        // data points per line
 window.threshold = 25;   // initial Mbps - make it global for topology.js
@@ -131,6 +132,64 @@ async function fetchJSON(endpoint, opts) {
   return res.json();
 }
 
+// Show notification to user
+function showNotification(message, type = "info") {
+  // Create notification element
+  const notification = document.createElement("div");
+  notification.className = `notification ${type}`;
+  notification.textContent = message;
+  
+  // Style the notification
+  notification.style.cssText = `
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: 10px 20px;
+    border-radius: 4px;
+    color: white;
+    font-weight: bold;
+    z-index: 1000;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    max-width: 400px;
+    word-wrap: break-word;
+  `;
+  
+  // Set background color based on type
+  switch (type) {
+    case "success":
+      notification.style.backgroundColor = "#28a745";
+      break;
+    case "error":
+      notification.style.backgroundColor = "#dc3545";
+      break;
+    case "warning":
+      notification.style.backgroundColor = "#ffc107";
+      notification.style.color = "#000";
+      break;
+    default: // info
+      notification.style.backgroundColor = "#17a2b8";
+  }
+  
+  // Add to page
+  document.body.appendChild(notification);
+  
+  // Fade in
+  setTimeout(() => {
+    notification.style.opacity = "1";
+  }, 10);
+  
+  // Remove after 3 seconds
+  setTimeout(() => {
+    notification.style.opacity = "0";
+    setTimeout(() => {
+      if (notification.parentNode) {
+        notification.parentNode.removeChild(notification);
+      }
+    }, 300);
+  }, 3000);
+}
+
 // Wire up UI controls
 function attachUI() {
   // Pause/Resume button
@@ -178,10 +237,24 @@ function attachUI() {
   
   // Mode change handler
   modeSelect.onchange = () => {
+    // Show notification about mode change and metrics reset
+    showNotification("Changing mode - efficiency metrics will be reset", "info");
+    
     fetch(API + "/config/mode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mode: modeSelect.value })
+    })
+    .then(response => response.json())
+    .then(data => {
+      if (data.error) {
+        showNotification("Error changing mode: " + data.error, "error");
+      } else {
+        showNotification("Mode changed successfully - metrics reset", "success");
+      }
+    })
+    .catch(error => {
+      showNotification("Error changing mode: " + error.message, "error");
     });
   };
 }
@@ -192,4 +265,9 @@ window.onload = () => {
   initChart();
   updateChart();
   setInterval(updateChart, POLL_INTERVAL);
+  
+  // Initialize topology visualization
+  if (typeof initTopology === 'function') {
+    initTopology();
+  }
 };

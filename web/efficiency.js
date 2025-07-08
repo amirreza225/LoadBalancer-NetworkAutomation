@@ -78,16 +78,16 @@ function updateMetricsDisplay(metrics) {
   // Total flows
   updateMetric("totalFlows", metrics.total_flows || 0);
   
-  // Load balanced flows
-  updateMetric("loadBalancedFlows", metrics.load_balanced_flows || 0);
+  // Total flows processed (displayed as "Total Flows Processed")
+  updateMetric("loadBalancedFlows", metrics.total_flows || 0);
   
   // Load balancing rate
   updateMetric("loadBalancingRate", 
     `${(metrics.load_balancing_rate || 0).toFixed(1)}%`);
   
-  // Congestion avoidance rate
+  // Congestion avoidance count (absolute number)
   updateMetric("congestionAvoidanceRate", 
-    `${(metrics.congestion_avoidance_rate || 0).toFixed(1)}%`);
+    `${metrics.congestion_avoided || 0} flows`);
   
   // Total reroutes
   updateMetric("totalReroutes", metrics.total_reroutes || 0);
@@ -206,12 +206,49 @@ function calculateEfficiencyScore(metrics) {
   return finalScore;
 }
 
+// Reset efficiency display to zero values
+function resetEfficiencyDisplay() {
+  // Reset chart
+  if (efficiencyChart) {
+    efficiencyChart.data.datasets[0].data = [0, 100];
+    efficiencyChart.data.labels = ["Load Balanced (0%)", "Shortest Path (100%)"];
+    efficiencyChart.update();
+  }
+  
+  // Reset all metric displays
+  updateMetric("totalFlows", 0);
+  updateMetric("loadBalancedFlows", 0);
+  updateMetric("loadBalancingRate", "0%");
+  updateMetric("congestionAvoidanceRate", "0 flows");
+  updateMetric("totalReroutes", 0);
+  updateMetric("varianceImprovement", "0%");
+  updateMetric("pathOverhead", "0%");
+  updateMetric("avgPathLengthLB", "0");
+  updateMetric("avgPathLengthSP", "0");
+  updateMetric("runtime", "0 min");
+  updateMetric("efficiencyScore", "0%");
+  
+  console.log("Efficiency display reset to zero values");
+}
+
+// Listen for mode changes to reset display
+function listenForModeChanges() {
+  const modeSelect = document.getElementById("modeSelect");
+  if (modeSelect) {
+    modeSelect.addEventListener("change", function() {
+      console.log("Mode changed, resetting efficiency display");
+      resetEfficiencyDisplay();
+    });
+  }
+}
+
 // Initialize efficiency tracking when page loads
 document.addEventListener('DOMContentLoaded', function() {
   if (document.getElementById("efficiencyChart")) {
     initEfficiencyChart();
     updateEfficiencyMetrics();
     updateAlgorithmInfo();
+    listenForModeChanges();
     setInterval(updateEfficiencyMetrics, 5000); // Update every 5 seconds
     setInterval(updateAlgorithmInfo, 10000); // Update algorithm info every 10 seconds
   }

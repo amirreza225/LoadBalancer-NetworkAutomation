@@ -9,6 +9,12 @@ services:
       - ./logs:/app/logs
       - ./data:/app/data
       - /lib/modules:/lib/modules:ro
+      # Mount source code for auto-reload during development
+      - ./lb_modular.py:/app/lb_modular.py
+      - ./lb_modules:/app/lb_modules
+      - ./web:/app/web
+      - ./generic_topo.py:/app/generic_topo.py
+      - ./hexring_topo.py:/app/hexring_topo.py
     environment:
       - TOPOLOGY=hexring
       - SWITCHES=4
@@ -18,7 +24,7 @@ services:
       - "8000:8000"  # Web dashboard
       - "8080:8080"  # REST API
       - "6653:6653"  # OpenFlow controller
-    command: /app/start.sh
+    command: /app/start_minimal.sh
     restart: unless-stopped
     stdin_open: true
     tty: true
