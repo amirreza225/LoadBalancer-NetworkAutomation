@@ -246,20 +246,27 @@ class LBRestController(ControllerBase):
             if hasattr(self.lb, 'efficiency_tracker'):
                 self.lb.efficiency_tracker.reset_efficiency_metrics()
             else:
-                # Fallback reset
+                # Fallback reset - count existing flows immediately
+                existing_flows_count = len(getattr(self.lb, 'flow_paths', {}))
                 self.lb.efficiency_metrics = {
-                    'total_flows': 0,
-                    'load_balanced_flows': 0,
-                    'congestion_avoided': 0,
+                    'total_flows': existing_flows_count,  # Count existing flows immediately
+                    'load_balanced_flows': 0,  # Reset - new mode will route differently
+                    'congestion_avoided': 0,   # Reset - new mode may avoid congestion differently
                     'avg_path_length_lb': 0,
                     'avg_path_length_sp': 0,
-                    'total_reroutes': 0,
+                    'total_reroutes': 0,       # Reset - fresh count for new mode
                     'link_utilization_variance': 0,
                     'baseline_link_utilization_variance': 0,
-                    'start_time': time.time()
+                    'start_time': time.time()  # Reset runtime for new mode
                 }
+                
+                # Clear congestion avoidance tracking for new mode
                 if hasattr(self.lb, 'flows_with_congestion_avoidance'):
                     self.lb.flows_with_congestion_avoidance.clear()
+                if hasattr(self.lb, 'congestion_avoidance_events'):
+                    self.lb.congestion_avoidance_events.clear()
+                if hasattr(self.lb, 'total_congestion_avoidance_events'):
+                    self.lb.total_congestion_avoidance_events = 0
             
             self.lb.logger.info("Load balancing mode changed from %s to %s, efficiency metrics reset", 
                               old_mode, new_mode)

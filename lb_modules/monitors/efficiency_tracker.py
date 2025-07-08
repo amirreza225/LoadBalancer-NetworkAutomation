@@ -456,19 +456,23 @@ class EfficiencyTracker:
         return max(0, min(100, score))
     
     def reset_efficiency_metrics(self):
-        """Reset efficiency metrics to initial state."""
+        """Reset efficiency metrics for mode change, preserving existing flow count."""
+        # Count existing flows immediately - they are still active
+        existing_flows_count = len(getattr(self.parent_app, 'flow_paths', {}))
+        
         self.efficiency_metrics = {
-            'total_flows': 0,
-            'load_balanced_flows': 0,
-            'congestion_avoided': 0,
+            'total_flows': existing_flows_count,  # Count existing flows immediately
+            'load_balanced_flows': 0,  # Reset - new mode will route differently
+            'congestion_avoided': 0,   # Reset - new mode may avoid congestion differently
             'avg_path_length_lb': 0,
             'avg_path_length_sp': 0,
-            'total_reroutes': 0,
+            'total_reroutes': 0,       # Reset - fresh count for new mode
             'link_utilization_variance': 0,
             'baseline_link_utilization_variance': 0,
-            'start_time': time.time()
+            'start_time': time.time()  # Reset runtime for new mode
         }
         
+        # Clear congestion avoidance tracking for new mode
         self.flows_with_congestion_avoidance.clear()
         
         # Clear congestion avoidance events tracking
@@ -483,10 +487,12 @@ class EfficiencyTracker:
         self.parent_app.efficiency_metrics = self.efficiency_metrics
         self.parent_app.flows_with_congestion_avoidance = self.flows_with_congestion_avoidance
         
-        # DO NOT re-evaluate existing flows to prevent inflation from current network state
-        # Existing flows should only contribute to metrics as they are naturally rerouted
-        self.logger.info("Efficiency metrics reset - %d existing flows will be counted as they are rerouted", 
-                        len(self.parent_app.flow_paths))
+        self.logger.info("Efficiency metrics reset for mode change - %d existing flows counted, load balancing and congestion avoidance metrics reset", 
+                        existing_flows_count)
+        
+        # Schedule re-evaluation of existing flows after reset to see how new mode would handle them
+        if existing_flows_count > 0:
+            self._schedule_flow_reevaluation()
     
     def count_existing_flows_only(self):
         """Count existing flows without evaluating their congestion avoidance status.
@@ -535,6 +541,53 @@ class EfficiencyTracker:
             self.logger.debug("Flow lifecycle check: No flows experiencing congestion")
         
         return flows_needing_reroute
+    
+    def _schedule_flow_reevaluation(self):
+        """Schedule re-evaluation of existing flows after mode change to update metrics."""
+        # Import here to avoid circular import
+        from ryu.lib import hub
+        
+        def reevaluate_flows():
+            # Wait a few seconds to let the mode change settle
+            hub.sleep(3)
+            
+            if not hasattr(self.parent_app, 'flow_paths') or not self.parent_app.topology_ready:
+                return
+            
+            now = time.time()
+            cost = self.parent_app._calculate_link_costs(now)
+            flows_evaluated = 0
+            
+            self.logger.info("Re-evaluating %d existing flows under new load balancing mode", 
+                           len(self.parent_app.flow_paths))
+            
+            for flow_key, current_path in self.parent_app.flow_paths.items():
+                if len(flow_key) != 2:
+                    continue
+                
+                # Get source and destination DPIDs
+                if isinstance(flow_key[0], str) and flow_key[0].startswith('00:00:00'):
+                    # MAC-based flow key, convert to DPID
+                    src_dpid = self.parent_app.mac_to_dpid.get(flow_key[0])
+                    dst_dpid = self.parent_app.mac_to_dpid.get(flow_key[1])
+                else:
+                    # DPID-based flow key
+                    src_dpid, dst_dpid = flow_key
+                
+                if not src_dpid or not dst_dpid:
+                    continue
+                
+                # Evaluate this flow's path under the new mode
+                self.update_flow_metrics(src_dpid, dst_dpid, current_path, cost, 
+                                       flow_key[0] if isinstance(flow_key[0], str) else None,
+                                       flow_key[1] if isinstance(flow_key[1], str) else None)
+                flows_evaluated += 1
+            
+            self.logger.info("Re-evaluated %d flows under new mode, metrics updated", flows_evaluated)
+        
+        # Schedule the re-evaluation to run asynchronously
+        from ryu.lib import hub
+        hub.spawn(reevaluate_flows)
     
     def increment_reroutes(self):
         """Increment reroute counter."""
