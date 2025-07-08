@@ -26,7 +26,7 @@ from ryu.ofproto import ofproto_v1_3
 from ryu.topology import event, switches
 from ryu.topology.api import get_switch, get_link
 
-POLL_PERIOD    = 2         # seconds
+POLL_PERIOD    = 1         # seconds
 MA_WINDOW_SEC  = 5         # seconds
 DEFAULT_THRESH = 25_000_000 # bytes/sec
 CONGESTION_PREDICTION_WINDOW = 10  # seconds for trend analysis
@@ -386,7 +386,7 @@ class LoadBalancerREST(app_manager.RyuApp):
         for i in range(len(path) - 1):
             u, v = path[i], path[i + 1]
             link_cost = cost.get((u, v), 0)
-            if link_cost > self.THRESHOLD_BPS * 0.7:  # Consider 70% threshold as approaching congestion
+            if link_cost > self.THRESHOLD_BPS * 0.5:  # Consider 50% threshold as approaching congestion
                 return True
         return False
     
@@ -551,7 +551,7 @@ class LoadBalancerREST(app_manager.RyuApp):
                     for i in range(len(baseline_path) - 1):
                         u, v = baseline_path[i], baseline_path[i + 1]
                         link_cost = cost.get((u, v), 0)
-                        if link_cost > self.THRESHOLD_BPS * 0.7:  # 70% threshold for prediction
+                        if link_cost > self.THRESHOLD_BPS * 0.5:  # 50% threshold for prediction
                             predicted_congestion = True
                             congested_links.append(f"{u}-{v} (predicted: {link_cost/1_000_000:.1f}M)")
                             break
@@ -564,7 +564,7 @@ class LoadBalancerREST(app_manager.RyuApp):
                 # 2. We chose a different path that has lower utilization cost
                 congestion_detected = baseline_congested or predicted_congestion
                 path_different = path != baseline_path
-                avoided_congestion = selected_path_cost < baseline_total_cost * 0.8  # Selected path is significantly better
+                avoided_congestion = selected_path_cost < baseline_total_cost * 0.95  # Selected path is better
                 
                 if congestion_detected and path_different and avoided_congestion:
                     self.efficiency_metrics['congestion_avoided'] += 1
