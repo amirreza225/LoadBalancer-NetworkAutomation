@@ -113,8 +113,8 @@ class LoadBalancerREST(app_manager.RyuApp):
         # start topology discovery and stats polling
         hub.spawn(self._discover_topology)
         hub.spawn(self._poll_stats)
-        # Clean up any existing host data on startup
-        hub.spawn(self._cleanup_stale_hosts)
+        # Clean up any existing host data on startup - DISABLED to prevent interference
+        # hub.spawn(self._cleanup_stale_hosts)
         # register REST API
         kwargs['wsgi'].register(LBRestController, {'lbapp': self})
 
@@ -160,45 +160,42 @@ class LoadBalancerREST(app_manager.RyuApp):
         self.mac_to_port.setdefault(dpid, {})[eth.src] = in_port
         if eth.src not in self.mac_to_dpid:
             self.mac_to_dpid[eth.src] = dpid
-            # Try to assign a host name if it looks like a host MAC
-            if self._is_host_mac(eth.src) and self._is_host_port(dpid, in_port):
-                # Only create host entries for MACs that haven't been seen and are on edge ports
-                if eth.src not in self.hosts:
-                    # Try to map known topology MAC addresses to proper host names
-                    host_name = self._get_proper_host_name(eth.src, dpid)
+            
+        # Simplified host discovery with hexring priority
+        if self._is_host_mac(eth.src) and self._is_host_port(dpid, in_port):
+            # Always proceed with host discovery - don't block on topology readiness
+            if eth.src not in self.hosts:
+                host_name = self._get_proper_host_name(eth.src, dpid)
+                is_hexring_mac = self._is_hexring_mac(eth.src)
+                
+                # Handle hexring MACs with priority (can override existing assignments)
+                if is_hexring_mac and host_name:
+                    host_num = int(host_name[1:])  # Extract number from h1, h2, etc.
+                    if 1 <= host_num <= 6:
+                        self._handle_hexring_host_discovery(eth.src, host_name, dpid, in_port)
+                        return
+                        
+                # Handle non-hexring MACs (avoid conflicts)
+                elif host_name:
+                    # Check if this host name is already taken
+                    existing_mac = self._find_host_by_name(host_name)
+                    if existing_mac:
+                        # Don't override existing assignments for non-hexring MACs
+                        self.logger.debug("Host name %s already taken by MAC %s, ignoring MAC %s", 
+                                        host_name, existing_mac, eth.src)
+                        return
                     
-                    # For hexring topology, only accept known MACs or reject unknown ones
-                    if host_name and host_name.startswith("h") and host_name[1:].isdigit():
-                        host_num = int(host_name[1:])
-                        # Only accept hosts h1-h6 for hexring topology
-                        if 1 <= host_num <= 6:
-                            # Check if this host name is already taken by another MAC
-                            existing_mac = None
-                            for existing_mac_addr, existing_name in self.hosts.items():
-                                if existing_name == host_name:
-                                    existing_mac = existing_mac_addr
-                                    break
-                            
-                            if existing_mac:
-                                self.logger.warning("Host name %s already taken by MAC %s, ignoring MAC %s", 
-                                                  host_name, existing_mac, eth.src)
-                                return  # Don't create duplicate host names
-                        else:
-                            # Don't create hosts beyond h6 for hexring
-                            self.logger.debug("Ignoring host %s (MAC: %s) - beyond hexring range", 
-                                            host_name, eth.src)
-                            return
-                    elif not host_name:
-                        # Only create generic hosts if we don't have too many already
-                        if len(self.hosts) >= 6:  # Limit to 6 hosts for hexring
-                            self.logger.debug("Ignoring additional host (MAC: %s) - already have %d hosts", 
-                                            eth.src, len(self.hosts))
-                            return
-                        self.host_counter += 1
-                        host_name = f"h{self.host_counter}"
-                    
+                    # Assign new host
                     self.hosts[eth.src] = host_name
-                    # Track host location
+                    self.host_locations.setdefault(dpid, set()).add(eth.src)
+                    self.logger.info("Discovered host %s (MAC: %s) at switch %s port %s", 
+                                   host_name, eth.src, dpid, in_port)
+                    
+                # Generate sequential host names as fallback
+                else:
+                    self.host_counter += 1
+                    host_name = f"h{self.host_counter}"
+                    self.hosts[eth.src] = host_name
                     self.host_locations.setdefault(dpid, set()).add(eth.src)
                     self.logger.info("Discovered host %s (MAC: %s) at switch %s port %s", 
                                    host_name, eth.src, dpid, in_port)
@@ -228,7 +225,11 @@ class LoadBalancerREST(app_manager.RyuApp):
             path = self.flow_paths.get(fid)
             if path:
                 nxt = self._next_hop(path, dpid)
-                out_port = self._get_host_port(dpid) if nxt is None else self.adj[dpid][nxt]
+                if nxt is None:
+                    # Last hop - use the specific port where destination MAC was learned
+                    out_port = self.mac_to_port[dpid].get(eth.dst, self._get_host_port(dpid))
+                else:
+                    out_port = self.adj[dpid][nxt]
             else:
                 out_port = self.mac_to_port[dpid].get(eth.dst, ofp.OFPP_FLOOD)
             
@@ -275,11 +276,18 @@ class LoadBalancerREST(app_manager.RyuApp):
     def _find_k_shortest_paths(self, src, dst, cost, k=3):
         """
         Find k shortest paths using Yen's algorithm (simplified version).
+        First path uses hop-count baseline, alternative paths use current utilization costs.
         """
         paths = []
         
-        # Find first shortest path
-        first_path = self._dijkstra(src, dst, cost, avoid_congested=False)
+        # Find first shortest path using hop-count (true baseline for congestion avoidance comparison)
+        uniform_cost = {}
+        for (u, v) in self.links.keys():
+            if u < v:  # Avoid duplicates - only add each link once
+                uniform_cost[(u, v)] = 1
+                uniform_cost[(v, u)] = 1
+        
+        first_path = self._dijkstra(src, dst, uniform_cost, avoid_congested=False)
         if not first_path:
             return paths
         
@@ -303,13 +311,13 @@ class LoadBalancerREST(app_manager.RyuApp):
                             edge = (path[j], path[j+1])
                             removed_edges.add(edge)
                 
-                # Create modified cost without removed edges
+                # Create modified cost without removed edges (use current utilization cost for alternatives)
                 modified_cost = dict(cost)
                 for edge in removed_edges:
                     if edge in modified_cost:
                         modified_cost[edge] = float('inf')
                 
-                # Find spur path
+                # Find spur path using current utilization cost for alternative paths
                 spur_path = self._dijkstra(spur_node, dst, modified_cost, avoid_congested=False)
                 if spur_path:
                     total_path = root_path[:-1] + spur_path
@@ -317,7 +325,7 @@ class LoadBalancerREST(app_manager.RyuApp):
                         candidates.append(total_path)
             
             if candidates:
-                # Select candidate with lowest cost
+                # Select candidate with lowest utilization-based cost
                 best_candidate = min(candidates, key=lambda p: self._calculate_path_cost(p, cost))
                 paths.append(best_candidate)
                 candidates.remove(best_candidate)
@@ -331,20 +339,56 @@ class LoadBalancerREST(app_manager.RyuApp):
         return sum(cost.get((path[i], path[i+1]), 0) for i in range(len(path)-1))
     
     def _select_adaptive_path(self, paths, cost):
-        """Select path based on current network conditions and congestion prediction."""
+        """
+        Select path based on current network conditions and congestion prediction.
+        Enhanced to actively avoid congested baseline paths.
+        """
         if not paths:
             return None
         
+        if len(paths) == 1:
+            return paths[0]
+        
         best_path = None
         best_score = float('inf')
+        baseline_path = paths[0]  # First path is hop-count baseline
         
-        for path in paths:
+        # Check if baseline path is congested
+        baseline_congested = self._is_path_congested(baseline_path, cost)
+        
+        for i, path in enumerate(paths):
             score = self._calculate_adaptive_score(path, cost)
+            
+            # Give significant bonus to paths that avoid congested baseline
+            if baseline_congested and path != baseline_path:
+                score *= 0.7  # 30% bonus for avoiding congested baseline
+                self.logger.debug("Applying congestion avoidance bonus to path %s (score reduced by 30%%)", path)
+            
             if score < best_score:
                 best_score = score
                 best_path = path
         
+        # Log decision for debugging
+        if baseline_congested and best_path != baseline_path:
+            self.logger.info("Adaptive path selection: avoided congested baseline %s, selected %s", 
+                           baseline_path, best_path)
+        elif baseline_congested and best_path == baseline_path:
+            self.logger.warning("Adaptive path selection: baseline %s is congested but no better alternative found", 
+                              baseline_path)
+        
         return best_path
+    
+    def _is_path_congested(self, path, cost):
+        """Check if a path has any congested links."""
+        if len(path) < 2:
+            return False
+        
+        for i in range(len(path) - 1):
+            u, v = path[i], path[i + 1]
+            link_cost = cost.get((u, v), 0)
+            if link_cost > self.THRESHOLD_BPS * 0.7:  # Consider 70% threshold as approaching congestion
+                return True
+        return False
     
     def _calculate_adaptive_score(self, path, cost):
         """Calculate adaptive score considering current load and predicted congestion."""
@@ -462,10 +506,18 @@ class LoadBalancerREST(app_manager.RyuApp):
         """Update efficiency metrics for a new flow."""
         self.efficiency_metrics['total_flows'] += 1
         
-        # Get baseline shortest path
-        baseline_path = self._shortest_path_baseline(s_dpid, d_dpid)
+        # Get the true baseline path (hop-count shortest path) for comparison
+        flow_key = (s_dpid, d_dpid)
+        baseline_path = None
         
-        self.logger.info("Flow metrics update - Path: %s, Baseline: %s", path, baseline_path)
+        # If we have alternative paths stored, the first one should be the hop-count baseline
+        if flow_key in self.alternative_paths and self.alternative_paths[flow_key]:
+            baseline_path = self.alternative_paths[flow_key][0]  # First path is hop-count baseline
+        else:
+            # Fallback to calculating baseline path
+            baseline_path = self._shortest_path_baseline(s_dpid, d_dpid)
+        
+        self.logger.info("Flow metrics update - Selected path: %s, Baseline (hop-count): %s", path, baseline_path)
         
         if baseline_path:
             # Check if we're using a different path than shortest path
@@ -477,19 +529,22 @@ class LoadBalancerREST(app_manager.RyuApp):
                 self.logger.info("Flow %d using shortest path %s", 
                                self.efficiency_metrics['total_flows'], path)
             
-            # Check if we avoided congestion (only count actual congestion scenarios)
+            # Enhanced congestion avoidance detection
             if len(baseline_path) > 1:
                 baseline_congested = False
                 predicted_congestion = False
                 congested_links = []
+                baseline_total_cost = 0
                 
                 # Check current congestion on baseline path
                 for i in range(len(baseline_path) - 1):
                     u, v = baseline_path[i], baseline_path[i + 1]
                     link_cost = cost.get((u, v), 0)
+                    baseline_total_cost += link_cost
+                    
                     if link_cost > self.THRESHOLD_BPS:
                         baseline_congested = True
-                        congested_links.append(f"{u}-{v}")
+                        congested_links.append(f"{u}-{v} (current: {link_cost/1_000_000:.1f}M)")
                 
                 # Check predicted congestion on baseline path (>70% threshold)
                 if not baseline_congested:
@@ -498,18 +553,37 @@ class LoadBalancerREST(app_manager.RyuApp):
                         link_cost = cost.get((u, v), 0)
                         if link_cost > self.THRESHOLD_BPS * 0.7:  # 70% threshold for prediction
                             predicted_congestion = True
-                            congested_links.append(f"{u}-{v} (predicted)")
+                            congested_links.append(f"{u}-{v} (predicted: {link_cost/1_000_000:.1f}M)")
                             break
                 
-                # Only count as congestion avoidance if:
-                # 1. Baseline path has actual congestion (current or predicted), AND
-                # 2. We chose a different path
-                if (baseline_congested or predicted_congestion) and path != baseline_path:
+                # Calculate selected path cost for comparison
+                selected_path_cost = self._calculate_path_cost(path, cost)
+                
+                # Enhanced congestion avoidance criteria:
+                # 1. Baseline path has congestion (current or predicted), AND
+                # 2. We chose a different path that has lower utilization cost
+                congestion_detected = baseline_congested or predicted_congestion
+                path_different = path != baseline_path
+                avoided_congestion = selected_path_cost < baseline_total_cost * 0.8  # Selected path is significantly better
+                
+                if congestion_detected and path_different and avoided_congestion:
                     self.efficiency_metrics['congestion_avoided'] += 1
                     reason = "current" if baseline_congested else "predicted"
-                    self.logger.info("Congestion avoided (%s) on baseline path %s, affected links: %s (flow %d, total avoided: %d)", 
-                                   reason, baseline_path, congested_links, self.efficiency_metrics['total_flows'],
+                    self.logger.info("✓ Congestion AVOIDED (%s) - baseline path %s cost=%.1fM, selected path %s cost=%.1fM, congested links: %s (flow %d, total avoided: %d)", 
+                                   reason, baseline_path, baseline_total_cost/1_000_000, path, selected_path_cost/1_000_000,
+                                   congested_links, self.efficiency_metrics['total_flows'],
                                    self.efficiency_metrics['congestion_avoided'])
+                elif congestion_detected and path_different:
+                    self.logger.info("⚠ Congestion detected but NOT avoided - baseline cost=%.1fM, selected cost=%.1fM (ratio=%.2f)", 
+                                   baseline_total_cost/1_000_000, selected_path_cost/1_000_000, 
+                                   selected_path_cost / (baseline_total_cost + 1))
+                elif congestion_detected:
+                    self.logger.info("⚠ Congestion detected on baseline %s but same path selected: %s", baseline_path, path)
+                else:
+                    self.logger.debug("No congestion detected on baseline path %s (max link: %.1fM, threshold: %.1fM)", 
+                                    baseline_path, max([cost.get((baseline_path[i], baseline_path[i+1]), 0) 
+                                                       for i in range(len(baseline_path)-1)], default=0)/1_000_000,
+                                    self.THRESHOLD_BPS/1_000_000)
         else:
             self.logger.warning("No baseline path found for %s → %s", s_dpid, d_dpid)
         
@@ -962,24 +1036,34 @@ class LoadBalancerREST(app_manager.RyuApp):
         cost = self._calculate_link_costs(now)
         for fid, old_path in list(self.flow_paths.items()):
             src, dst = fid
-            # Safety check: ensure both MACs still exist in mac_to_dpid
-            if src not in self.mac_to_dpid or dst not in self.mac_to_dpid:
-                # Remove stale flow path
-                del self.flow_paths[fid]
+            # Less aggressive safety check: verify MACs and hosts exist
+            if (src not in self.mac_to_dpid or dst not in self.mac_to_dpid or 
+                src not in self.hosts or dst not in self.hosts):
+                # Log warning but don't immediately delete - MAC might be temporarily missing
+                self.logger.debug("Flow %s->%s has missing MAC/host data, skipping rebalance", 
+                                src, dst)
                 continue
             s_dpid, d_dpid = self.mac_to_dpid[src], self.mac_to_dpid[dst]
             new_path = self._find_path(s_dpid, d_dpid, cost)
             if new_path and new_path != old_path:
-                src_name = self.hosts.get(src, src)
-                dst_name = self.hosts.get(dst, dst)
-                self.logger.info("Re-routing %s→%s: %s → %s", src_name, dst_name, old_path, new_path)
-                self._install_path(new_path, src, dst)
-                self.flow_paths[fid] = new_path
-                self.efficiency_metrics['total_reroutes'] += 1
+                # Only reroute if there's significant benefit or current path is congested
+                old_cost = self._calculate_path_cost(old_path, cost)
+                new_cost = self._calculate_path_cost(new_path, cost)
                 
-                # Don't double-count congestion avoidance during reroutes
-                # The congestion avoidance metric is already counted during initial flow installation
-                self.logger.info("Rerouted from %s to %s due to changing conditions", old_path, new_path)
+                # Check if current path is actually congested
+                old_path_congested = any(cost.get((old_path[i], old_path[i+1]), 0) > self.THRESHOLD_BPS 
+                                       for i in range(len(old_path)-1))
+                
+                # Only reroute if: 1) old path is congested, OR 2) new path is significantly better (>20% improvement)
+                should_reroute = old_path_congested or (old_cost > 0 and (old_cost - new_cost) / old_cost > 0.2)
+                
+                if should_reroute:
+                    src_name = self.hosts.get(src, src)
+                    dst_name = self.hosts.get(dst, dst)
+                    self.logger.info("Re-routing %s→%s: %s → %s", src_name, dst_name, old_path, new_path)
+                    self._install_path(new_path, src, dst)
+                    self.flow_paths[fid] = new_path
+                    self.efficiency_metrics['total_reroutes'] += 1
 
     def _avg_rate(self, dpid, port, now):
         """
@@ -993,7 +1077,12 @@ class LoadBalancerREST(app_manager.RyuApp):
         Installs a flow entry on all datapaths in the path.
         """
         out_map = {path[i]: self.adj[path[i]][path[i+1]] for i in range(len(path)-1)}
-        out_map[path[-1]] = self._get_host_port(path[-1])
+        # Use the specific port where destination MAC was learned
+        dst_dpid = path[-1]
+        if dst_dpid in self.mac_to_port and dst in self.mac_to_port[dst_dpid]:
+            out_map[path[-1]] = self.mac_to_port[dst_dpid][dst]
+        else:
+            out_map[path[-1]] = self._get_host_port(path[-1])
         for dpid, dp in self.dp_set.items():
             if dpid not in out_map: continue
             p = dp.ofproto_parser
@@ -1207,7 +1296,9 @@ class LoadBalancerREST(app_manager.RyuApp):
             try:
                 mac_num = int(mac.split(":")[5], 16)
                 # For generic topologies, hosts are typically numbered sequentially
-                return f"h{mac_num}"
+                # Support any number of hosts, not just 1-6
+                if mac_num > 0:  # Valid host number
+                    return f"h{mac_num}"
             except ValueError:
                 pass
         
@@ -1224,27 +1315,316 @@ class LoadBalancerREST(app_manager.RyuApp):
             return port not in inter_switch_ports
         return True  # If topology not ready, assume it could be a host port
     
-    def _cleanup_stale_hosts(self):
+    def _is_hexring_mac(self, mac):
         """
-        Clean up stale host entries on startup to prevent accumulation.
+        Determine if a MAC address is a valid hexring topology MAC.
         """
-        hub.sleep(10)  # Wait longer for topology to be fully established
+        hexring_macs = {
+            "00:00:00:00:00:01", "00:00:00:00:00:02", "00:00:00:00:00:03",
+            "00:00:00:00:00:04", "00:00:00:00:00:05", "00:00:00:00:00:06"
+        }
+        return mac in hexring_macs
+    
+    def _find_host_by_name(self, host_name):
+        """
+        Find the MAC address of a host by its name.
+        """
+        for mac, name in self.hosts.items():
+            if name == host_name:
+                return mac
+        return None
+    
+    def _handle_hexring_host_discovery(self, mac, host_name, dpid, in_port):
+        """
+        Handle discovery of a hexring MAC with priority override capability.
+        """
+        existing_mac = self._find_host_by_name(host_name)
         
-        # Only clean up if we have non-hexring MACs (random MACs indicate early traffic)
+        if existing_mac and existing_mac != mac:
+            # Hexring MAC takes priority - remove the existing assignment
+            self.logger.info("🔄 Hexring MAC priority: %s takes over host name %s from %s", 
+                           mac, host_name, existing_mac)
+            
+            # Clean up old host assignment
+            old_dpid = self.mac_to_dpid.get(existing_mac)
+            if old_dpid and old_dpid in self.host_locations:
+                self.host_locations[old_dpid].discard(existing_mac)
+            
+            # Remove from hosts dictionary
+            if existing_mac in self.hosts:
+                del self.hosts[existing_mac]
+            
+            # Clean up flows involving the old MAC
+            self._cleanup_flows_for_mac(existing_mac)
+            
+            # Remove old MAC from mac_to_dpid if it's not used elsewhere
+            if existing_mac in self.mac_to_dpid:
+                del self.mac_to_dpid[existing_mac]
+            
+            self.logger.info("Cleaned up old assignment for %s (MAC: %s)", host_name, existing_mac)
+        
+        # Assign or reassign the hexring MAC
+        self.hosts[mac] = host_name
+        self.host_locations.setdefault(dpid, set()).add(mac)
+        
+        self.logger.info("✅ Hexring host %s (MAC: %s) discovered at switch %s port %s", 
+                       host_name, mac, dpid, in_port)
+        
+        # Trigger flow revalidation if topology is ready
+        if self.topology_ready:
+            self._revalidate_flows_after_host_change()
+    
+    def _cleanup_flows_for_mac(self, mac):
+        """
+        Clean up flows that involve a specific MAC address.
+        """
+        flows_to_remove = []
+        for (src, dst), path in self.flow_paths.items():
+            if src == mac or dst == mac:
+                flows_to_remove.append((src, dst))
+        
+        for flow_id in flows_to_remove:
+            del self.flow_paths[flow_id]
+            self.logger.debug("Removed flow for old MAC: %s → %s", flow_id[0], flow_id[1])
+        
+        return len(flows_to_remove)
+    
+    def _revalidate_flows_after_host_change(self):
+        """
+        Enhanced flow revalidation with automatic recovery for proper hexring hosts.
+        """
+        flows_cleaned = len(self.flow_paths)
+        
+        if flows_cleaned > 0:
+            self.logger.info("🔄 Revalidating %d flows after host discovery changes", flows_cleaned)
+            
+            # Reset efficiency metrics since topology changed
+            self.efficiency_metrics['total_flows'] = max(0, self.efficiency_metrics['total_flows'] - flows_cleaned)
+            self.efficiency_metrics['load_balanced_flows'] = max(0, self.efficiency_metrics['load_balanced_flows'])
+            self.efficiency_metrics['congestion_avoided'] = max(0, self.efficiency_metrics['congestion_avoided'])
+        
+        # Trigger automatic flow recovery if we have proper hexring topology
+        if self.topology_ready:
+            self._trigger_flow_recovery()
+    
+    def _trigger_flow_recovery(self):
+        """
+        Automatically recreate flows between discovered hexring hosts.
+        """
         hexring_macs = {"00:00:00:00:00:01", "00:00:00:00:00:02", "00:00:00:00:00:03", 
                        "00:00:00:00:00:04", "00:00:00:00:00:05", "00:00:00:00:00:06"}
         
-        current_macs = set(self.hosts.keys())
-        hexring_present = bool(current_macs.intersection(hexring_macs))
+        # Get current hexring hosts
+        hexring_hosts = {}
+        for mac, host_name in self.hosts.items():
+            if mac in hexring_macs:
+                hexring_hosts[host_name] = mac
         
-        if not hexring_present and len(self.hosts) > 0:
-            self.logger.info("Cleaning up %d non-hexring host entries...", len(self.hosts))
-            self.hosts.clear()
-            self.host_locations.clear()
+        if len(hexring_hosts) >= 2:  # Need at least 2 hosts for flow creation
+            self.logger.info("🔧 Flow recovery: %d hexring hosts detected, enabling auto-flow creation", 
+                           len(hexring_hosts))
+            
+            # Enable proactive flow creation between hexring hosts
+            self._create_hexring_flows(hexring_hosts)
+    
+    def _create_hexring_flows(self, hexring_hosts):
+        """
+        Proactively create flows between hexring hosts to enable load balancing.
+        """
+        host_macs = list(hexring_hosts.values())
+        flows_created = 0
+        
+        if len(host_macs) < 2:
+            return flows_created
+        
+        # Calculate current costs for path selection
+        cost = self._calculate_link_costs(time.time())
+        
+        # Create flows between first few pairs to establish topology understanding
+        for i in range(min(3, len(host_macs))):  # Limit to first 3 hosts to avoid flooding
+            for j in range(i + 1, min(i + 3, len(host_macs))):  # Create limited connections
+                src_mac = host_macs[i]
+                dst_mac = host_macs[j]
+                
+                # Skip if flow already exists
+                if (src_mac, dst_mac) in self.flow_paths or (dst_mac, src_mac) in self.flow_paths:
+                    continue
+                
+                # Get switch locations
+                src_dpid = self.mac_to_dpid.get(src_mac)
+                dst_dpid = self.mac_to_dpid.get(dst_mac)
+                
+                if src_dpid and dst_dpid and src_dpid != dst_dpid:
+                    # Find and install path
+                    path = self._find_path(src_dpid, dst_dpid, cost)
+                    if path:
+                        self._install_path(path, src_mac, dst_mac)
+                        self.flow_paths[(src_mac, dst_mac)] = path
+                        
+                        src_name = self.hosts.get(src_mac, src_mac[-6:])
+                        dst_name = self.hosts.get(dst_mac, dst_mac[-6:])
+                        self.logger.info("🔧 Flow recovery: created flow %s→%s path %s", 
+                                       src_name, dst_name, path)
+                        
+                        # Update efficiency metrics for recovered flow
+                        self._update_flow_metrics(src_dpid, dst_dpid, path, cost)
+                        flows_created += 1
+        
+        if flows_created > 0:
+            self.logger.info("✅ Flow recovery complete: created %d flows between hexring hosts", 
+                           flows_created)
+        
+        return flows_created
+    
+    def _force_hexring_discovery(self):
+        """
+        Force discovery and validation of hexring topology (for admin use).
+        """
+        hexring_macs = {"00:00:00:00:00:01", "00:00:00:00:00:02", "00:00:00:00:00:03", 
+                       "00:00:00:00:00:04", "00:00:00:00:00:05", "00:00:00:00:00:06"}
+        
+        # Clear any non-hexring hosts
+        non_hexring_macs = set(self.hosts.keys()) - hexring_macs
+        
+        for mac in list(non_hexring_macs):
+            if mac in self.hosts:
+                host_name = self.hosts[mac]
+                self.logger.info("🧹 Force cleanup: removing non-hexring host %s (MAC: %s)", 
+                               host_name, mac)
+                
+                # Clean up flows and data structures
+                self._cleanup_flows_for_mac(mac)
+                
+                old_dpid = self.mac_to_dpid.get(mac)
+                if old_dpid and old_dpid in self.host_locations:
+                    self.host_locations[old_dpid].discard(mac)
+                
+                if mac in self.hosts:
+                    del self.hosts[mac]
+                if mac in self.mac_to_dpid:
+                    del self.mac_to_dpid[mac]
+        
+        # Reset counter for clean state
+        self.host_counter = 0
+        
+        # Trigger flow recovery if topology is ready
+        if self.topology_ready:
+            self._trigger_flow_recovery()
+        
+        return len(non_hexring_macs)
+    
+    def _cleanup_stale_hosts(self):
+        """
+        Enhanced cleanup with periodic conflict detection.
+        """
+        hub.sleep(10)  # Wait for topology to be established
+        
+        # Perform initial cleanup
+        self._resolve_host_conflicts()
+        
+        # Periodic cleanup every 30 seconds
+        while True:
+            hub.sleep(30)
+            if self.topology_ready:
+                conflicts_resolved = self._resolve_host_conflicts()
+                if conflicts_resolved > 0:
+                    self.logger.info("Periodic cleanup resolved %d host conflicts", conflicts_resolved)
+    
+    def _resolve_host_conflicts(self):
+        """
+        Detect and resolve MAC assignment conflicts, prioritizing hexring MACs.
+        """
+        hexring_macs = {"00:00:00:00:00:01", "00:00:00:00:00:02", "00:00:00:00:00:03", 
+                       "00:00:00:00:00:04", "00:00:00:00:00:05", "00:00:00:00:00:06"}
+        
+        conflicts_resolved = 0
+        current_macs = set(self.hosts.keys())
+        hexring_macs_present = current_macs.intersection(hexring_macs)
+        non_hexring_macs = current_macs - hexring_macs
+        
+        # If we have hexring MACs but also non-hexring MACs with conflicting names
+        if hexring_macs_present and non_hexring_macs:
+            for hexring_mac in hexring_macs_present:
+                if hexring_mac in self.hosts:
+                    expected_host_name = self._get_proper_host_name(hexring_mac, None)
+                    if expected_host_name:
+                        # Check if any non-hexring MAC has this host name
+                        for non_hexring_mac in list(non_hexring_macs):
+                            if (non_hexring_mac in self.hosts and 
+                                self.hosts[non_hexring_mac] == expected_host_name and
+                                non_hexring_mac != hexring_mac):
+                                
+                                self.logger.info("🧹 Resolving conflict: removing non-hexring MAC %s using host name %s (hexring MAC %s takes priority)",
+                                               non_hexring_mac, expected_host_name, hexring_mac)
+                                
+                                # Clean up the conflicting non-hexring MAC
+                                self._cleanup_flows_for_mac(non_hexring_mac)
+                                
+                                # Remove from tracking structures
+                                old_dpid = self.mac_to_dpid.get(non_hexring_mac)
+                                if old_dpid and old_dpid in self.host_locations:
+                                    self.host_locations[old_dpid].discard(non_hexring_mac)
+                                
+                                if non_hexring_mac in self.hosts:
+                                    del self.hosts[non_hexring_mac]
+                                if non_hexring_mac in self.mac_to_dpid:
+                                    del self.mac_to_dpid[non_hexring_mac]
+                                
+                                conflicts_resolved += 1
+        
+        # Clean up completely if no hexring MACs but we have random MACs
+        elif not hexring_macs_present and non_hexring_macs and not self.topology_ready:
+            self.logger.info("🧹 Pre-topology cleanup: removing %d non-hexring host entries", len(non_hexring_macs))
+            
+            for mac in list(non_hexring_macs):
+                self._cleanup_flows_for_mac(mac)
+                
+                old_dpid = self.mac_to_dpid.get(mac)
+                if old_dpid and old_dpid in self.host_locations:
+                    self.host_locations[old_dpid].discard(mac)
+                
+                if mac in self.hosts:
+                    del self.hosts[mac]
+                if mac in self.mac_to_dpid:
+                    del self.mac_to_dpid[mac]
+            
             self.host_counter = 0
-            self.logger.info("Host cleanup complete - ready for proper hexring hosts")
-        else:
-            self.logger.info("Hexring hosts detected or no cleanup needed (%d hosts)", len(self.hosts))
+            conflicts_resolved = len(non_hexring_macs)
+            
+        return conflicts_resolved
+    
+    def _validate_hexring_topology(self):
+        """
+        Validate that we have proper hexring topology with correct host assignments.
+        """
+        hexring_macs = {"00:00:00:00:00:01", "00:00:00:00:00:02", "00:00:00:00:00:03", 
+                       "00:00:00:00:00:04", "00:00:00:00:00:05", "00:00:00:00:00:06"}
+        
+        validation_results = {
+            'hexring_hosts_detected': 0,
+            'proper_mappings': 0,
+            'conflicts': 0,
+            'missing_hosts': []
+        }
+        
+        # Check current host assignments
+        for mac, host_name in self.hosts.items():
+            if mac in hexring_macs:
+                validation_results['hexring_hosts_detected'] += 1
+                expected_name = self._get_proper_host_name(mac, None)
+                if expected_name == host_name:
+                    validation_results['proper_mappings'] += 1
+                else:
+                    validation_results['conflicts'] += 1
+        
+        # Check for missing hexring hosts
+        for mac in hexring_macs:
+            if mac not in self.hosts:
+                expected_name = self._get_proper_host_name(mac, None)
+                if expected_name:
+                    validation_results['missing_hosts'].append(expected_name)
+        
+        return validation_results
     
     def _flood_packet(self, dp, msg, in_port):
         """
@@ -1618,6 +1998,81 @@ class LBRestController(ControllerBase):
             'current_threshold': self.lb.THRESHOLD_BPS
         }
         return self._cors(json.dumps(debug_info))
+    
+    @route('debug_congestion', '/debug/congestion-avoidance', methods=['GET'])
+    def debug_congestion_avoidance(self, req, **_):
+        """Debug endpoint to analyze congestion avoidance decisions."""
+        now = time.time()
+        cost = self.lb._calculate_link_costs(now)
+        
+        debug_info = {
+            'current_threshold_mbps': self.lb.THRESHOLD_BPS / 1_000_000,
+            'load_balancing_mode': {v: k for k, v in LOAD_BALANCING_MODES.items()}.get(self.lb.load_balancing_mode, 'unknown'),
+            'congestion_analysis': {},
+            'path_analysis': {},
+            'link_utilization': {}
+        }
+        
+        # Analyze current link utilization vs threshold
+        for (u, v), (pu, pv) in self.lb.links.items():
+            if u < v:  # Avoid duplicates
+                rate_u = self.lb._avg_rate(u, pu, now)
+                rate_v = self.lb._avg_rate(v, pv, now)
+                max_util = max(rate_u, rate_v)
+                link_key = f"{u}-{v}"
+                
+                debug_info['link_utilization'][link_key] = {
+                    'utilization_mbps': max_util / 1_000_000,
+                    'threshold_mbps': self.lb.THRESHOLD_BPS / 1_000_000,
+                    'congestion_ratio': max_util / self.lb.THRESHOLD_BPS,
+                    'is_congested': max_util > self.lb.THRESHOLD_BPS,
+                    'approaching_congestion': max_util > self.lb.THRESHOLD_BPS * 0.7
+                }
+        
+        # Analyze each active flow's path selection
+        for (src, dst), current_path in self.lb.flow_paths.items():
+            if src in self.lb.mac_to_dpid and dst in self.lb.mac_to_dpid:
+                s_dpid = self.lb.mac_to_dpid[src]
+                d_dpid = self.lb.mac_to_dpid[dst]
+                flow_key = (s_dpid, d_dpid)
+                
+                # Get baseline path
+                baseline_path = None
+                if flow_key in self.lb.alternative_paths and self.lb.alternative_paths[flow_key]:
+                    baseline_path = self.lb.alternative_paths[flow_key][0]
+                else:
+                    baseline_path = self.lb._shortest_path_baseline(s_dpid, d_dpid)
+                
+                if baseline_path:
+                    # Calculate costs
+                    baseline_cost = self.lb._calculate_path_cost(baseline_path, cost)
+                    current_cost = self.lb._calculate_path_cost(current_path, cost)
+                    
+                    # Check for congestion on baseline
+                    baseline_congested_links = []
+                    for i in range(len(baseline_path) - 1):
+                        u, v = baseline_path[i], baseline_path[i + 1]
+                        link_cost = cost.get((u, v), 0)
+                        if link_cost > self.lb.THRESHOLD_BPS:
+                            baseline_congested_links.append(f"{u}-{v}")
+                    
+                    src_name = self.lb.hosts.get(src, src[-6:])
+                    dst_name = self.lb.hosts.get(dst, dst[-6:])
+                    flow_label = f"{src_name}→{dst_name}"
+                    
+                    debug_info['path_analysis'][flow_label] = {
+                        'current_path': current_path,
+                        'baseline_path': baseline_path,
+                        'path_different': current_path != baseline_path,
+                        'baseline_cost_mbps': baseline_cost / 1_000_000,
+                        'current_cost_mbps': current_cost / 1_000_000,
+                        'cost_improvement': (baseline_cost - current_cost) / 1_000_000 if baseline_cost > 0 else 0,
+                        'baseline_congested_links': baseline_congested_links,
+                        'would_avoid_congestion': len(baseline_congested_links) > 0 and current_path != baseline_path,
+                        'alternative_paths_available': len(self.lb.alternative_paths.get(flow_key, []))
+                    }
+        
+        return self._cors(json.dumps(debug_info))
 
     @route('cleanup', '/admin/cleanup-hosts', methods=['POST', 'OPTIONS'])
     def cleanup_hosts(self, req, **_):
@@ -1667,4 +2122,83 @@ class LBRestController(ControllerBase):
             }))
         except Exception as e:
             self.lb.logger.error("Host cleanup error: %s", e)
+            return self._cors(json.dumps({"error": str(e)}), 500)
+    
+    @route('validate_topology', '/debug/validate-hexring', methods=['GET'])
+    def validate_hexring_topology(self, req, **_):
+        """Validate hexring topology and host assignments."""
+        validation_results = self.lb._validate_hexring_topology()
+        
+        # Add current host status
+        current_hosts = {}
+        hexring_macs = {"00:00:00:00:00:01", "00:00:00:00:00:02", "00:00:00:00:00:03", 
+                       "00:00:00:00:00:04", "00:00:00:00:00:05", "00:00:00:00:00:06"}
+        
+        for mac, host_name in self.lb.hosts.items():
+            dpid = self.lb.mac_to_dpid.get(mac, 'unknown')
+            current_hosts[host_name] = {
+                'mac': mac,
+                'switch': dpid,
+                'is_hexring_mac': mac in hexring_macs,
+                'expected_name': self.lb._get_proper_host_name(mac, dpid)
+            }
+        
+        validation_results['current_hosts'] = current_hosts
+        validation_results['topology_ready'] = self.lb.topology_ready
+        validation_results['total_hosts'] = len(self.lb.hosts)
+        
+        return self._cors(json.dumps(validation_results))
+    
+    @route('resolve_conflicts', '/admin/resolve-conflicts', methods=['POST', 'OPTIONS'])
+    def resolve_host_conflicts(self, req, **_):
+        """Manually trigger host conflict resolution."""
+        if req.method == 'OPTIONS':
+            return self._cors('', 200)
+            
+        try:
+            conflicts_resolved = self.lb._resolve_host_conflicts()
+            
+            # Get updated validation results
+            validation_results = self.lb._validate_hexring_topology()
+            
+            result = {
+                'conflicts_resolved': conflicts_resolved,
+                'validation_results': validation_results,
+                'message': f"Resolved {conflicts_resolved} host conflicts"
+            }
+            
+            self.lb.logger.info("Manual conflict resolution: resolved %d conflicts", conflicts_resolved)
+            
+            return self._cors(json.dumps(result))
+        except Exception as e:
+            self.lb.logger.error("Conflict resolution error: %s", e)
+            return self._cors(json.dumps({"error": str(e)}), 500)
+    
+    @route('force_hexring', '/admin/force-hexring-discovery', methods=['POST', 'OPTIONS'])
+    def force_hexring_discovery(self, req, **_):
+        """Force hexring topology discovery and cleanup."""
+        if req.method == 'OPTIONS':
+            return self._cors('', 200)
+            
+        try:
+            # Force hexring discovery
+            non_hexring_removed = self.lb._force_hexring_discovery()
+            
+            # Get current status
+            validation_results = self.lb._validate_hexring_topology()
+            
+            result = {
+                'non_hexring_hosts_removed': non_hexring_removed,
+                'validation_results': validation_results,
+                'message': f"Forced hexring discovery: removed {non_hexring_removed} non-hexring hosts",
+                'topology_ready': self.lb.topology_ready,
+                'flow_count': len(self.lb.flow_paths)
+            }
+            
+            self.lb.logger.info("Forced hexring discovery: removed %d non-hexring hosts", 
+                              non_hexring_removed)
+            
+            return self._cors(json.dumps(result))
+        except Exception as e:
+            self.lb.logger.error("Force hexring discovery error: %s", e)
             return self._cors(json.dumps({"error": str(e)}), 500)
