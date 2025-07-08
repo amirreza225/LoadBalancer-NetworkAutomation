@@ -110,6 +110,8 @@ class LoadBalancerREST(app_manager.RyuApp):
             'baseline_link_utilization_variance': 0,
             'start_time': time.time()
         }
+        # Track flows that have avoided congestion (prevent double counting)
+        self.flows_with_congestion_avoidance = set()
         # start topology discovery and stats polling
         hub.spawn(self._discover_topology)
         hub.spawn(self._poll_stats)
@@ -574,7 +576,8 @@ class LoadBalancerREST(app_manager.RyuApp):
                     # Count as avoided if we either have lower cost OR avoid congested links
                     avoided_congestion = (selected_path_cost < baseline_total_cost * 1.2) or selected_path_avoids_congestion
                 else:
-                    avoided_congestion = selected_path_cost < baseline_total_cost * 0.95
+                    # No congestion detected, so no congestion avoidance possible
+                    avoided_congestion = False
                 
                 # Debug logging for congestion avoidance
                 self.logger.info("Congestion avoidance check: detected=%s, path_different=%s, avoided=%s (selected=%.1fM, baseline=%.1fM, ratio=%.2f)", 
@@ -587,7 +590,11 @@ class LoadBalancerREST(app_manager.RyuApp):
                                     baseline_congested, predicted_congestion, congested_links)
                 
                 if congestion_detected and path_different and avoided_congestion:
-                    self.efficiency_metrics['congestion_avoided'] += 1
+                    # Track unique flows that have avoided congestion
+                    flow_key = (src_mac, dst_mac)
+                    if flow_key not in self.flows_with_congestion_avoidance:
+                        self.flows_with_congestion_avoidance.add(flow_key)
+                        self.efficiency_metrics['congestion_avoided'] += 1
                     reason = "current" if baseline_congested else "predicted"
                     self.logger.info("✓ Congestion AVOIDED (%s) - baseline path %s cost=%.1fM, selected path %s cost=%.1fM, congested links: %s (flow %d, total avoided: %d)", 
                                    reason, baseline_path, baseline_total_cost/1_000_000, path, selected_path_cost/1_000_000,
@@ -1046,7 +1053,7 @@ class LoadBalancerREST(app_manager.RyuApp):
             self._calculate_efficiency_metrics(now)
             self._cleanup_old_flows()  # Periodic cleanup to prevent memory leaks
 
-    def _track_congestion_avoidance_reroute(self, old_path, new_path, cost):
+    def _track_congestion_avoidance_reroute(self, old_path, new_path, cost, flow_key):
         """
         Track congestion avoidance during re-routing operations.
         """
@@ -1090,7 +1097,11 @@ class LoadBalancerREST(app_manager.RyuApp):
             avoided_congestion = (new_cost < old_cost * 1.2) or selected_path_avoids_congestion
             
             if avoided_congestion:
-                self.efficiency_metrics['congestion_avoided'] += 1
+                # Track unique flows that have avoided congestion during reroute
+                if flow_key not in self.flows_with_congestion_avoidance:
+                    self.flows_with_congestion_avoidance.add(flow_key)
+                    self.efficiency_metrics['congestion_avoided'] += 1
+                    
                 reason = "current" if old_path_congested else "predicted"
                 self.logger.info("✓ Congestion AVOIDED during reroute (%s) - old path %s cost=%.1fM, new path %s cost=%.1fM, congested links: %s (total avoided: %d)", 
                                reason, old_path, old_cost/1_000_000, new_path, new_cost/1_000_000,
@@ -1141,7 +1152,7 @@ class LoadBalancerREST(app_manager.RyuApp):
                 
                 if should_reroute:
                     # Track congestion avoidance for this re-routing
-                    self._track_congestion_avoidance_reroute(old_path, new_path, cost)
+                    self._track_congestion_avoidance_reroute(old_path, new_path, cost, fid)
                     
                     src_name = self.hosts.get(src, src)
                     dst_name = self.hosts.get(dst, dst)
@@ -2028,6 +2039,7 @@ class LBRestController(ControllerBase):
         
         if total_flows > 0:
             metrics['load_balancing_rate'] = min(100, (load_balanced_flows / total_flows) * 100)
+            # Cap congestion avoidance at 100% since re-routing can cause multiple avoidance events per flow
             metrics['congestion_avoidance_rate'] = min(100, (congestion_avoided / total_flows) * 100)
         else:
             metrics['load_balancing_rate'] = 0
