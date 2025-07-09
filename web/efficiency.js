@@ -9,7 +9,13 @@ let congestionTrendsData = {
 };
 
 let currentLoadBalancingMode = "unknown";
-const MAX_DATA_POINTS = 60; // Keep last 60 data points (5 minutes at 5-second intervals)
+const MAX_DATA_POINTS = 300; // Keep last 300 data points (5 minutes at 1-second intervals)
+
+// 30-second rolling average tracking
+let avg30sMetrics = {
+  history: [], // Array of {timestamp, efficiency, loadBalancing, congestionAvoidance, varianceImprovement, reroutesPerSec}
+  lastTotalReroutes: 0,
+};
 
 // Initialize efficiency metrics chart
 function initEfficiencyChart() {
@@ -112,10 +118,10 @@ function initCongestionTrendsChart() {
         x: {
           type: "time",
           time: {
-            unit: "minute",
+            unit: "second",
             tooltipFormat: "HH:mm:ss",
             displayFormats: {
-              minute: "HH:mm",
+              second: "mm:ss",
             },
           },
           title: {
@@ -227,6 +233,9 @@ async function updateEfficiencyMetrics() {
 
     // Update congestion trends chart with enhanced metrics
     updateCongestionTrends(metrics);
+
+    // Update 30s rolling averages
+    update30sAverages(metrics);
   } catch (error) {
     console.error("Error updating efficiency metrics:", error);
     // Show error in UI
@@ -251,20 +260,34 @@ function updateMetricsDisplay(metrics) {
   updateMetric("loadBalancedFlows", metrics.total_flows || 0);
 
   // Load balancing rate - use traffic-based calculation if available
-  const loadBalancingRate = metrics.load_distribution?.load_balancing_effectiveness || metrics.load_balancing_rate || 0;
+  const loadBalancingRate =
+    metrics.load_distribution?.load_balancing_effectiveness ||
+    metrics.load_balancing_rate ||
+    0;
   const legacyRate = metrics.legacy_load_balancing_rate;
-  
+
   updateMetric(
     "loadBalancingRate",
     `${loadBalancingRate.toFixed(1)}%`,
-    loadBalancingRate > 80 ? "excellent" : 
-    loadBalancingRate > 60 ? "good" : 
-    loadBalancingRate > 30 ? "fair" : "poor"
+    loadBalancingRate > 80
+      ? "excellent"
+      : loadBalancingRate > 60
+      ? "good"
+      : loadBalancingRate > 30
+      ? "fair"
+      : "poor"
   );
-  
+
   // Log comparison if both metrics are available
-  if (legacyRate !== undefined && Math.abs(loadBalancingRate - legacyRate) > 5) {
-    console.log(`Load balancing: Traffic-based: ${loadBalancingRate.toFixed(1)}%, Flow-based: ${legacyRate.toFixed(1)}%`);
+  if (
+    legacyRate !== undefined &&
+    Math.abs(loadBalancingRate - legacyRate) > 5
+  ) {
+    console.log(
+      `Load balancing: Traffic-based: ${loadBalancingRate.toFixed(
+        1
+      )}%, Flow-based: ${legacyRate.toFixed(1)}%`
+    );
   }
 
   // Congestion avoidance percentage (enhanced algorithm)
@@ -321,7 +344,7 @@ function updateMetricsDisplay(metrics) {
       ? "fair"
       : "poor"
   );
-  
+
   // Update additional load distribution metrics
   updateLoadDistributionMetrics(metrics);
 }
@@ -455,8 +478,9 @@ async function updateCongestionTrends(metrics) {
   congestionTrendsChart.data.labels.push(now);
   congestionTrendsChart.data.datasets[0].data.push(pathBasedValue);
 
-  // Keep only last MAX_DATA_POINTS
-  if (congestionTrendsChart.data.labels.length > MAX_DATA_POINTS) {
+  // Keep only last 30 data points (30 seconds at 1-second intervals)
+  const MAX_CONGESTION_POINTS = 30;
+  if (congestionTrendsChart.data.labels.length > MAX_CONGESTION_POINTS) {
     congestionTrendsChart.data.labels.shift();
     congestionTrendsChart.data.datasets[0].data.shift();
   }
@@ -501,9 +525,9 @@ function updateLoadDistributionMetrics(metrics) {
   if (!metrics.load_distribution) {
     return; // No load distribution data available
   }
-  
+
   const loadDist = metrics.load_distribution;
-  
+
   // Log detailed load distribution metrics for debugging
   console.log("Load Distribution Metrics:", {
     coefficient_of_variation: loadDist.coefficient_of_variation,
@@ -511,30 +535,36 @@ function updateLoadDistributionMetrics(metrics) {
     utilization_balance_score: loadDist.utilization_balance_score,
     variance_reduction: loadDist.variance_reduction,
     avg_utilization: loadDist.avg_utilization,
-    utilization_range: loadDist.utilization_range
+    utilization_range: loadDist.utilization_range,
   });
-  
+
   // Add visual indicators for load distribution quality
   const loadBalancingElement = document.getElementById("loadBalancingRate");
   if (loadBalancingElement && loadBalancingElement.parentElement) {
     const parentCard = loadBalancingElement.parentElement;
-    
+
     // Add a title attribute with detailed explanation
     const cv = loadDist.coefficient_of_variation || 0;
     const entropy = loadDist.distribution_entropy || 0;
-    
-    parentCard.title = 
+
+    parentCard.title =
       `Traffic-based Load Balancing Effectiveness\n` +
       `• Coefficient of Variation: ${cv.toFixed(3)} (lower = better)\n` +
       `• Distribution Entropy: ${entropy.toFixed(3)} (higher = better)\n` +
-      `• Balance Score: ${(loadDist.utilization_balance_score || 0).toFixed(1)}%\n` +
-      `• Variance Reduction: ${(loadDist.variance_reduction || 0).toFixed(1)}%\n` +
-      `• Avg Utilization: ${(loadDist.avg_utilization / 1000000 || 0).toFixed(1)} Mbps`;
-    
+      `• Balance Score: ${(loadDist.utilization_balance_score || 0).toFixed(
+        1
+      )}%\n` +
+      `• Variance Reduction: ${(loadDist.variance_reduction || 0).toFixed(
+        1
+      )}%\n` +
+      `• Avg Utilization: ${(loadDist.avg_utilization / 1000000 || 0).toFixed(
+        1
+      )} Mbps`;
+
     // Add visual indicator for calculation method
-    if (!parentCard.querySelector('.calc-method-indicator')) {
-      const indicator = document.createElement('div');
-      indicator.className = 'calc-method-indicator';
+    if (!parentCard.querySelector(".calc-method-indicator")) {
+      const indicator = document.createElement("div");
+      indicator.className = "calc-method-indicator";
       indicator.style.cssText = `
         position: absolute;
         top: 4px;
@@ -545,20 +575,24 @@ function updateLoadDistributionMetrics(metrics) {
         border-radius: 50%;
         title: Traffic-based calculation
       `;
-      indicator.title = 'Traffic-based calculation';
-      parentCard.style.position = 'relative';
+      indicator.title = "Traffic-based calculation";
+      parentCard.style.position = "relative";
       parentCard.appendChild(indicator);
     }
   }
-  
+
   // Update variance improvement with new calculation if available
   if (loadDist.variance_reduction !== undefined) {
     updateMetric(
-      "varianceImprovement", 
+      "varianceImprovement",
       `${loadDist.variance_reduction.toFixed(1)}%`,
-      loadDist.variance_reduction > 50 ? "excellent" :
-      loadDist.variance_reduction > 25 ? "good" :
-      loadDist.variance_reduction > 10 ? "fair" : "poor"
+      loadDist.variance_reduction > 50
+        ? "excellent"
+        : loadDist.variance_reduction > 25
+        ? "good"
+        : loadDist.variance_reduction > 10
+        ? "fair"
+        : "poor"
     );
   }
 }
@@ -594,13 +628,104 @@ function resetEfficiencyDisplay() {
   console.log("Efficiency display reset to zero values");
 }
 
+// Update 30-second rolling averages
+function update30sAverages(metrics) {
+  const now = Date.now();
+
+  // Calculate reroutes per second
+  const currentReroutesPerSec = Math.max(
+    0,
+    metrics.total_reroutes - avg30sMetrics.lastTotalReroutes
+  );
+
+  // Add current metrics to history
+  avg30sMetrics.history.push({
+    timestamp: now,
+    efficiency: metrics.efficiency_score || 0,
+    loadBalancing: metrics.load_balancing_rate || 0,
+    congestionAvoidance: metrics.congestion_avoidance_rate || 0,
+    varianceImprovement: metrics.variance_improvement_percent || 0,
+    reroutesPerSec: currentReroutesPerSec,
+  });
+
+  // Keep only last 30 seconds of data
+  avg30sMetrics.history = avg30sMetrics.history.filter(
+    (item) => now - item.timestamp <= 30000
+  );
+
+  // Calculate and display averages
+  if (avg30sMetrics.history.length > 0) {
+    const avgEfficiency =
+      avg30sMetrics.history.reduce((sum, item) => sum + item.efficiency, 0) /
+      avg30sMetrics.history.length;
+    const avgLoadBalancing =
+      avg30sMetrics.history.reduce((sum, item) => sum + item.loadBalancing, 0) /
+      avg30sMetrics.history.length;
+    const avgCongestionAvoidance =
+      avg30sMetrics.history.reduce(
+        (sum, item) => sum + item.congestionAvoidance,
+        0
+      ) / avg30sMetrics.history.length;
+    const avgVarianceImprovement =
+      avg30sMetrics.history.reduce(
+        (sum, item) => sum + item.varianceImprovement,
+        0
+      ) / avg30sMetrics.history.length;
+    const avgReroutesPerSec =
+      avg30sMetrics.history.reduce(
+        (sum, item) => sum + item.reroutesPerSec,
+        0
+      ) / avg30sMetrics.history.length;
+
+    // Update display
+    document.getElementById("avg30sEfficiency").textContent =
+      avgEfficiency.toFixed(1) + "%";
+    document.getElementById("avg30sLoadBalancing").textContent =
+      avgLoadBalancing.toFixed(1) + "%";
+    document.getElementById("avg30sCongestionAvoidance").textContent =
+      avgCongestionAvoidance.toFixed(1) + "%";
+    document.getElementById("avg30sVarianceImprovement").textContent =
+      avgVarianceImprovement.toFixed(1) + "%";
+    document.getElementById("avg30sReroutesPerSecond").textContent =
+      avgReroutesPerSec.toFixed(2);
+  } else {
+    // No data yet
+    document.getElementById("avg30sEfficiency").textContent = "-";
+    document.getElementById("avg30sLoadBalancing").textContent = "-";
+    document.getElementById("avg30sCongestionAvoidance").textContent = "-";
+    document.getElementById("avg30sVarianceImprovement").textContent = "-";
+    document.getElementById("avg30sReroutesPerSecond").textContent = "-";
+  }
+
+  // Update tracking values
+  avg30sMetrics.lastTotalReroutes = metrics.total_reroutes;
+}
+
+// Reset 30s averages (called on mode change)
+function reset30sAverages() {
+  avg30sMetrics.history = [];
+  avg30sMetrics.lastTotalReroutes = 0;
+
+  // Reset display
+  document.getElementById("avg30sEfficiency").textContent = "-";
+  document.getElementById("avg30sLoadBalancing").textContent = "-";
+  document.getElementById("avg30sCongestionAvoidance").textContent = "-";
+  document.getElementById("avg30sVarianceImprovement").textContent = "-";
+  document.getElementById("avg30sReroutesPerSecond").textContent = "-";
+
+  console.log("30s averages reset");
+}
+
 // Listen for mode changes to reset display
 function listenForModeChanges() {
   const modeSelect = document.getElementById("modeSelect");
   if (modeSelect) {
     modeSelect.addEventListener("change", function () {
-      console.log("Mode changed, resetting efficiency display");
+      console.log(
+        "Mode changed, resetting efficiency display and 30s averages"
+      );
       resetEfficiencyDisplay();
+      reset30sAverages();
     });
   }
 }
@@ -613,7 +738,7 @@ document.addEventListener("DOMContentLoaded", function () {
     updateEfficiencyMetrics();
     updateAlgorithmInfo();
     listenForModeChanges();
-    setInterval(updateEfficiencyMetrics, 5000); // Update every 5 seconds
-    setInterval(updateAlgorithmInfo, 10000); // Update algorithm info every 10 seconds
+    setInterval(updateEfficiencyMetrics, 1000); // Update every 1 second for D-ITG detection
+    setInterval(updateAlgorithmInfo, 5000); // Update algorithm info every 5 seconds
   }
 });

@@ -165,7 +165,7 @@ function initTopology() {
   updateTopology();
   setInterval(checkTopologyChanges, 10000); // Check structure changes less frequently
   setInterval(updateLinkColors, 500); // Update colors more frequently
-  setInterval(updateCongestedLinksList, 2000);
+  setInterval(updateCongestedLinksList, 1000); // Update congested links every 1 second for D-ITG
 
   // Gentle layout optimization for tidiness
   setInterval(() => {

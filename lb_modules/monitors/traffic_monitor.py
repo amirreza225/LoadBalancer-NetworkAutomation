@@ -87,7 +87,8 @@ class TrafficMonitor:
                     if now - t <= CONGESTION_PREDICTION_WINDOW
                 ]
         
-        if now - self.last_calc >= MA_WINDOW_SEC:
+        # MAXIMUM FREQUENCY FOR D-ITG COMPATIBILITY (every 0.5 seconds matching poll period)
+        if now - self.last_calc >= 0.5:  # Check every 0.5 seconds matching POLL_PERIOD
             self.last_calc = now
             self._trigger_rebalance(now)
             self._calculate_efficiency_metrics(now)

@@ -899,6 +899,54 @@ body {
   font-family: var(--font-family-mono);
 }
 
+/* ========================================
+   30s Average Metrics Panel
+======================================== */
+
+.avg-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.avg-metric-card {
+  background: white;
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  text-align: center;
+  box-shadow: var(--shadow-xs);
+  transition: all 0.2s ease;
+}
+
+.avg-metric-card:hover {
+  border-color: var(--primary-300);
+  box-shadow: var(--shadow-sm);
+}
+
+.avg-metric-value {
+  font-size: 1.25rem;
+  font-weight: var(--font-bold);
+  color: var(--primary-600);
+  margin-bottom: var(--space-1);
+}
+
+.avg-metric-label {
+  font-size: 0.75rem;
+  color: var(--gray-600);
+  font-weight: var(--font-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.025em;
+}
+
+.chart-subtitle {
+  font-size: 0.75rem;
+  color: var(--gray-500);
+  font-style: italic;
+  margin-left: var(--space-2);
+}
+
 .mb-0 {
   margin-bottom: 0;
 }

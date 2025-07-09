@@ -1,7 +1,7 @@
 // Configuration
 const API = "http://localhost:8080";
 window.API = API;  // Make API available globally
-const POLL_INTERVAL = 1000;   // ms
+const POLL_INTERVAL = 500;    // ms (reduced for D-ITG real-time detection)
 const MAX_POINTS = 20;        // data points per line
 window.threshold = 25;   // initial Mbps - make it global for topology.js
 let paused = false;

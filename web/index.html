@@ -101,14 +101,52 @@
         </div>
       </section>
 
-      <!-- Congestion Avoidance Trends Display -->
+      <!-- Real-time Performance Analytics -->
       <section class="dashboard-section">
         <div class="section-header">
-          <h3>Congestion Avoidance Trends</h3>
+          <h3>Real-time and Average Performance Analytics</h3>
         </div>
         <div class="row">
-          <div class="col-lg-12">
+          <div class="col-lg-6">
             <div id="congestionTrendsContainer"></div>
+          </div>
+          <div class="col-lg-6">
+            <div class="chart-container">
+              <div class="chart-header">
+                <h4 class="chart-title">30s Average Metrics</h4>
+                <span class="chart-subtitle"
+                  >Last 30 seconds rolling average (resets on mode change)</span
+                >
+              </div>
+              <div class="avg-metrics-grid">
+                <div class="avg-metric-card">
+                  <div class="avg-metric-value" id="avg30sEfficiency">-</div>
+                  <div class="avg-metric-label">Avg Efficiency</div>
+                </div>
+                <div class="avg-metric-card">
+                  <div class="avg-metric-value" id="avg30sLoadBalancing">-</div>
+                  <div class="avg-metric-label">Avg Load Balancing</div>
+                </div>
+                <div class="avg-metric-card">
+                  <div class="avg-metric-value" id="avg30sCongestionAvoidance">
+                    -
+                  </div>
+                  <div class="avg-metric-label">Avg Congestion Avoidance</div>
+                </div>
+                <div class="avg-metric-card">
+                  <div class="avg-metric-value" id="avg30sVarianceImprovement">
+                    -
+                  </div>
+                  <div class="avg-metric-label">Avg Variance Improvement</div>
+                </div>
+                <div class="avg-metric-card">
+                  <div class="avg-metric-value" id="avg30sReroutesPerSecond">
+                    -
+                  </div>
+                  <div class="avg-metric-label">Reroutes/sec</div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </section>

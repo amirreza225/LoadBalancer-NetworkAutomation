@@ -2,9 +2,9 @@
 Configuration constants for the SDN Load Balancer
 """
 
-# Core timing constants
-POLL_PERIOD = 1                    # seconds
-MA_WINDOW_SEC = 5                  # seconds
+# Core timing constants (OPTIMIZED FOR D-ITG COMPATIBILITY)
+POLL_PERIOD = 0.5                  # seconds (reduced from 1 for faster D-ITG detection)
+MA_WINDOW_SEC = 0.5                # seconds (minimal window to capture D-ITG real-time rates)
 DEFAULT_THRESH = 25_000_000        # bytes/sec
 CONGESTION_PREDICTION_WINDOW = 10  # seconds for trend analysis
 
@@ -50,7 +50,7 @@ CONGESTION_PARAMS = {
     'ewma_alpha': EWMA_ALPHA,
     'congestion_threshold': 0.8,    # 80% utilization
     'prediction_threshold': 0.7,    # 70% utilization for prediction
-    'approaching_congestion_threshold': 0.7,  # 70% threshold for approaching congestion (was 30%)
+    'approaching_congestion_threshold': 0.2,  # 20% threshold for approaching congestion (reduced for D-ITG sensitivity)
     'burst_detection_threshold': 0.5,  # 50% threshold for burst detection
     'adaptive_prediction_weight': 0.6,  # 60% weight for prediction (was 30%)
     'congestion_avoidance_bonus': 0.5,  # 50% bonus for avoiding congestion (was 30%)

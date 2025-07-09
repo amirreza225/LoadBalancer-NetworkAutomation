@@ -115,8 +115,8 @@ class EfficiencyTracker:
                 congested_links = []
                 baseline_total_cost = 0
                 
-                # Check current congestion on baseline path
-                congestion_threshold = self.parent_app.THRESHOLD_BPS * 0.3  # 30% threshold
+                # Check current congestion on baseline path (REDUCED FOR D-ITG COMPATIBILITY)
+                congestion_threshold = self.parent_app.THRESHOLD_BPS * 0.1  # 10% threshold (reduced from 30% for D-ITG)
                 self.logger.debug("Checking baseline congestion with threshold %.1f Mbps", congestion_threshold/1_000_000)
                 
                 for i in range(len(baseline_path) - 1):
@@ -124,9 +124,9 @@ class EfficiencyTracker:
                     link_cost = cost.get((u, v), 0)
                     baseline_total_cost += link_cost
                     
-                    # Only count actual congestion (>30% threshold) for avoidance tracking
+                    # Only count actual congestion (>10% threshold) for avoidance tracking
                     # Predicted congestion tracking removed to prevent false positives
-                    if link_cost > congestion_threshold:  # 30% threshold for actual congestion
+                    if link_cost > congestion_threshold:  # 10% threshold for actual congestion (reduced for D-ITG)
                         baseline_congested = True
                         congested_links.append(f"{u}-{v} (congested: {link_cost/1_000_000:.1f}M)")
                         self.logger.debug("Link %s-%s is congested: %.1f Mbps > %.1f Mbps threshold", 
