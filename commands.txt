@@ -16,6 +16,30 @@ cd LoadBalancer-NetworkAutomation
 -check ports (ensure 8000, 8080, 6653 are available)-
 sudo netstat -tulpn | grep -E ':(8000|8080|6653)'
 
+# ==================== D-ITG INSTALLATION ====================
+
+-install D-ITG dependencies-
+sudo apt update
+sudo apt install build-essential gcc g++ make wget unzip
+
+-download and install D-ITG-
+cd /tmp
+wget http://traffic.comics.unina.it/software/ITG/codice/D-ITG-2.8.1-r1023-src.zip
+unzip D-ITG-2.8.1-r1023-src.zip
+cd D-ITG-2.8.1-r1023/src
+make
+
+-install D-ITG binaries-
+sudo cp ../bin/ITGSend /usr/local/bin/
+sudo cp ../bin/ITGRecv /usr/local/bin/
+sudo cp ../bin/ITGLog /usr/local/bin/
+sudo cp ../bin/ITGDec /usr/local/bin/
+sudo chmod +x /usr/local/bin/ITG*
+
+-verify D-ITG installation-
+which ITGSend ITGRecv ITGLog ITGDec
+ITGSend -h
+
 # ==================== RUNNING THE SYSTEM ====================
 
 -start controller (Terminal 1)-
@@ -99,10 +123,10 @@ h6 iperf -c 192.168.8.43 -u -p 5003 -b 900M -t 200
 -congestion stress test hexring-
 h5 iperf -s -u -p 5001 &
 h6 iperf -s -u -p 5002 &
-h6 iperf -c 192.168.8.44 -u -p 5001 -b 300M -t 180 &
-h1 iperf -c 192.168.8.45 -u -p 5002 -b 300M -t 180 &
-h2 iperf -c 192.168.8.40 -u -b 500M -t 180 &
-h3 iperf -c 192.168.8.45 -u -b 500M -t 180
+h6 iperf -c 192.168.8.44 -u -p 5001 -b 300M -t 600 &
+h1 iperf -c 192.168.8.45 -u -p 5002 -b 300M -t 600 &
+h2 iperf -c 192.168.8.44 -u -b 500M -t 600 &
+h3 iperf -c 192.168.8.45 -u -b 500M -t 600
 
 # ===== GENERIC TOPOLOGY TRAFFIC (192.168.1.x) =====
 
@@ -127,6 +151,193 @@ h4 iperf -s -p 5003 &
 h1 iperf -c 192.168.1.12 -u -p 5001 -b 150M -t 180 &
 h2 iperf -c 192.168.1.13 -u -p 5002 -b 150M -t 180 &
 h3 iperf -c 192.168.1.14 -u -p 5003 -b 150M -t 180
+
+# ==================== D-ITG TRAFFIC GENERATION ====================
+
+# ===== BASIC D-ITG TESTING =====
+
+-simple D-ITG test hexring-
+# Terminal 1: Start receiver
+h2 ITGRecv -l /tmp/h2_recv.log &
+# Terminal 2: Start sender with UDP traffic
+h1 ITGSend -T UDP -a 192.168.8.41 -c 100 -C 10 -t 30000 -l /tmp/h1_send.log
+
+-TCP D-ITG test hexring-
+# TCP traffic test
+h2 ITGRecv -l /tmp/h2_tcp_recv.log &
+h1 ITGSend -T TCP -a 192.168.8.41 -c 500 -C 50 -t 60000 -l /tmp/h1_tcp_send.log
+
+-variable bitrate D-ITG test-
+# Variable bitrate to test adaptive algorithms
+h2 ITGRecv -l /tmp/h2_var_recv.log &
+h1 ITGSend -T UDP -a 192.168.8.41 -C 10 -c 100 -t 10000 -l /tmp/h1_var1.log &
+sleep 10
+h1 ITGSend -T UDP -a 192.168.8.41 -C 100 -c 1000 -t 10000 -l /tmp/h1_var2.log &
+sleep 10
+h1 ITGSend -T UDP -a 192.168.8.41 -C 50 -c 2000 -t 10000 -l /tmp/h1_var3.log
+
+# ===== ELEPHANT FLOW SIMULATION WITH D-ITG =====
+
+-elephant flow simulation (>10 Mbps)-
+# Large packet size, high constant rate for elephant flows
+h2 ITGRecv -l /tmp/elephant_recv.log &
+h3 ITGRecv -l /tmp/elephant2_recv.log &
+# Elephant flow 1: 50 Mbps constant
+h1 ITGSend -T UDP -a 192.168.8.41 -C 6250 -c 1000 -t 120000 -l /tmp/elephant1_send.log &
+# Elephant flow 2: 30 Mbps constant  
+h4 ITGSend -T UDP -a 192.168.8.42 -C 3750 -c 1000 -t 120000 -l /tmp/elephant2_send.log
+
+-mice flow simulation (<1 Mbps)-
+# Small packet size, low rate for mice flows
+h5 ITGRecv -l /tmp/mice_recv.log &
+h6 ITGRecv -l /tmp/mice2_recv.log &
+# Mice flow 1: 500 Kbps with small packets
+h1 ITGSend -T UDP -a 192.168.8.44 -C 62 -c 64 -t 60000 -l /tmp/mice1_send.log &
+# Mice flow 2: 200 Kbps with small packets
+h2 ITGSend -T UDP -a 192.168.8.45 -C 25 -c 64 -t 60000 -l /tmp/mice2_send.log
+
+# ===== MIXED TRAFFIC PATTERNS FOR FLOW-AWARE TESTING =====
+
+-mixed elephant and mice flows-
+# Start receivers
+h2 ITGRecv -l /tmp/mixed_recv1.log &
+h3 ITGRecv -l /tmp/mixed_recv2.log &
+h4 ITGRecv -l /tmp/mixed_recv3.log &
+h5 ITGRecv -l /tmp/mixed_recv4.log &
+
+# Elephant flows (>10 Mbps)
+h1 ITGSend -T UDP -a 192.168.8.41 -C 6250 -c 1000 -t 180000 -l /tmp/elephant_mixed1.log &
+h6 ITGSend -T UDP -a 192.168.8.42 -C 5000 -c 1000 -t 180000 -l /tmp/elephant_mixed2.log &
+
+# Normal flows (1-10 Mbps)
+h1 ITGSend -T TCP -a 192.168.8.43 -C 625 -c 500 -t 180000 -l /tmp/normal_mixed1.log &
+h6 ITGSend -T UDP -a 192.168.8.44 -C 1250 -c 500 -t 180000 -l /tmp/normal_mixed2.log &
+
+# Mice flows (<1 Mbps)
+h2 ITGSend -T UDP -a 192.168.8.45 -C 50 -c 64 -t 180000 -l /tmp/mice_mixed1.log &
+h3 ITGSend -T UDP -a 192.168.8.41 -C 75 -c 64 -t 180000 -l /tmp/mice_mixed2.log
+
+# ===== BURST TRAFFIC TESTING FOR ENHANCED ADAPTIVE MODE =====
+
+-burst detection test with D-ITG-
+# Start receiver
+h2 ITGRecv -l /tmp/burst_recv.log &
+
+# Create burst pattern: baseline -> burst -> baseline
+# Baseline traffic: 5 Mbps
+h1 ITGSend -T UDP -a 192.168.8.41 -C 625 -c 1000 -t 30000 -l /tmp/baseline1.log &
+sleep 30
+
+# Sudden burst: 200 Mbps for 10 seconds
+h1 ITGSend -T UDP -a 192.168.8.41 -C 25000 -c 1000 -t 10000 -l /tmp/burst1.log &
+sleep 10
+
+# Return to baseline: 5 Mbps
+h1 ITGSend -T UDP -a 192.168.8.41 -C 625 -c 1000 -t 30000 -l /tmp/baseline2.log &
+sleep 30
+
+# Second burst: 300 Mbps for 15 seconds
+h1 ITGSend -T UDP -a 192.168.8.41 -C 37500 -c 1000 -t 15000 -l /tmp/burst2.log
+
+-gradual congestion buildup test-
+# Start receivers
+h2 ITGRecv -l /tmp/gradual_recv1.log &
+h3 ITGRecv -l /tmp/gradual_recv2.log &
+
+# Gradual increase to test prediction algorithms
+# Phase 1: 10 Mbps for 60 seconds
+h1 ITGSend -T UDP -a 192.168.8.41 -C 1250 -c 1000 -t 60000 -l /tmp/phase1.log &
+sleep 60
+
+# Phase 2: Add 50 Mbps for 60 seconds  
+h4 ITGSend -T UDP -a 192.168.8.42 -C 6250 -c 1000 -t 60000 -l /tmp/phase2.log &
+sleep 60
+
+# Phase 3: Add 100 Mbps for 60 seconds
+h5 ITGSend -T UDP -a 192.168.8.41 -C 12500 -c 1000 -t 60000 -l /tmp/phase3.log &
+sleep 60
+
+# Phase 4: Add 200 Mbps to create congestion
+h6 ITGSend -T UDP -a 192.168.8.42 -C 25000 -c 1000 -t 60000 -l /tmp/phase4.log
+
+# ===== CONGESTION STRESS TESTING FOR 65%+ AVOIDANCE VALIDATION =====
+
+-high congestion scenario for enhanced adaptive mode-
+# This scenario should trigger 65%+ congestion avoidance
+# Start receivers
+h5 ITGRecv -l /tmp/stress_recv1.log &
+h6 ITGRecv -l /tmp/stress_recv2.log &
+
+# Primary congestion flows (recreate user's scenario with D-ITG)
+# 300 Mbps flows
+h6 ITGSend -T UDP -a 192.168.8.44 -C 37500 -c 1000 -t 600000 -l /tmp/stress_300_1.log &
+h1 ITGSend -T UDP -a 192.168.8.45 -C 37500 -c 1000 -t 600000 -l /tmp/stress_300_2.log &
+
+# 500 Mbps flows to same destinations
+h2 ITGSend -T UDP -a 192.168.8.44 -C 62500 -c 1000 -t 600000 -l /tmp/stress_500_1.log &
+h3 ITGSend -T UDP -a 192.168.8.45 -C 62500 -c 1000 -t 600000 -l /tmp/stress_500_2.log
+
+-multi-destination congestion test-
+# Test with multiple congested destinations
+h2 ITGRecv -l /tmp/multi_recv1.log &
+h3 ITGRecv -l /tmp/multi_recv2.log &
+h4 ITGRecv -l /tmp/multi_recv3.log &
+h5 ITGRecv -l /tmp/multi_recv4.log &
+
+# Create congestion to multiple destinations simultaneously
+h1 ITGSend -T UDP -a 192.168.8.41 -C 25000 -c 1000 -t 300000 -l /tmp/multi_dest1.log &
+h1 ITGSend -T UDP -a 192.168.8.42 -C 25000 -c 1000 -t 300000 -l /tmp/multi_dest2.log &
+h1 ITGSend -T UDP -a 192.168.8.43 -C 25000 -c 1000 -t 300000 -l /tmp/multi_dest3.log &
+h1 ITGSend -T UDP -a 192.168.8.44 -C 25000 -c 1000 -t 300000 -l /tmp/multi_dest4.log
+
+# ===== QOS TESTING WITH D-ITG =====
+
+-QoS CRITICAL traffic simulation-
+# CRITICAL: <10ms latency requirement
+h2 ITGRecv -l /tmp/qos_critical_recv.log &
+# Small packets, consistent low delay
+h1 ITGSend -T UDP -a 192.168.8.41 -C 500 -c 64 -t 120000 -l /tmp/qos_critical.log
+
+-QoS HIGH traffic simulation-
+# HIGH: <50ms latency requirement  
+h3 ITGRecv -l /tmp/qos_high_recv.log &
+# Medium packets, moderate rate
+h1 ITGSend -T UDP -a 192.168.8.42 -C 2500 -c 256 -t 120000 -l /tmp/qos_high.log
+
+-QoS NORMAL traffic simulation-
+# NORMAL: <200ms latency requirement
+h4 ITGRecv -l /tmp/qos_normal_recv.log &
+# Standard packets, higher rate
+h1 ITGSend -T TCP -a 192.168.8.43 -C 5000 -c 512 -t 120000 -l /tmp/qos_normal.log
+
+-QoS BEST_EFFORT traffic simulation-
+# BEST_EFFORT: <1000ms latency tolerance
+h5 ITGRecv -l /tmp/qos_best_recv.log &
+# Large packets, bulk transfer
+h1 ITGSend -T TCP -a 192.168.8.44 -C 12500 -c 1400 -t 120000 -l /tmp/qos_best.log
+
+# ===== LATENCY-AWARE TESTING =====
+
+-low latency application simulation-
+# Real-time application with strict latency requirements
+h2 ITGRecv -l /tmp/realtime_recv.log &
+# Gaming traffic: frequent small packets
+h1 ITGSend -T UDP -a 192.168.8.41 -C 20 -c 64 -t 300000 -l /tmp/gaming.log &
+
+# VoIP traffic simulation
+h3 ITGRecv -l /tmp/voip_recv.log &
+# G.711 codec simulation: 64 kbps, 20ms packets
+h4 ITGSend -T UDP -a 192.168.8.42 -C 8 -c 160 -t 300000 -l /tmp/voip.log
+
+-video streaming simulation-
+# Video streaming with adaptive bitrate
+h5 ITGRecv -l /tmp/video_recv.log &
+# HD video: 5 Mbps average with variations
+h1 ITGSend -T UDP -a 192.168.8.44 -C 625 -c 1400 -t 300000 -l /tmp/video_hd.log &
+
+# 4K video: 25 Mbps with larger packets
+h6 ITGRecv -l /tmp/video_4k_recv.log &
+h2 ITGSend -T UDP -a 192.168.8.45 -C 3125 -c 1400 -t 300000 -l /tmp/video_4k.log
 
 # ==================== ADVANCED TESTING ====================
 
@@ -188,6 +399,121 @@ curl http://localhost:8080/config/threshold
 curl -X POST http://localhost:8080/config/threshold \
   -H "Content-Type: application/json" \
   -d '{"threshold": 2000000}'
+
+# ==================== D-ITG MONITORING & ANALYSIS ====================
+
+-view D-ITG real-time sending logs-
+# Monitor active sending sessions
+tail -f /tmp/h1_send.log
+tail -f /tmp/elephant1_send.log
+tail -f /tmp/stress_300_1.log
+
+-view D-ITG real-time receiving logs-
+# Monitor active receiving sessions
+tail -f /tmp/h2_recv.log
+tail -f /tmp/stress_recv1.log
+tail -f /tmp/qos_critical_recv.log
+
+-decode D-ITG binary logs to text-
+# Convert binary logs to human-readable format
+ITGDec /tmp/h1_send.log
+ITGDec /tmp/h2_recv.log
+ITGDec /tmp/elephant1_send.log
+ITGDec /tmp/stress_300_1.log
+
+-analyze D-ITG traffic statistics-
+# Extract detailed statistics from logs
+ITGDec /tmp/h1_send.log | grep -E "(Packets|Bytes|Duration|Bitrate)"
+ITGDec /tmp/h2_recv.log | grep -E "(Jitter|Delay|Loss)"
+
+-monitor burst detection effectiveness-
+# Check if adaptive mode detected bursts during D-ITG burst tests
+curl -s http://localhost:8080/stats/efficiency | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print(f'Congestion Avoidance Rate: {data.get(\"congestion_avoidance_rate\", 0):.1f}%')
+print(f'Load Balancing Rate: {data.get(\"load_balancing_rate\", 0):.1f}%')
+print(f'Adaptive Mode Score: {data.get(\"efficiency_score\", 0):.1f}%')
+"
+
+-compare D-ITG vs iperf efficiency-
+# Run same test with both tools and compare results
+echo "=== D-ITG Test ==="
+h2 ITGRecv -l /tmp/compare_recv.log &
+h1 ITGSend -T UDP -a 192.168.8.41 -C 12500 -c 1000 -t 60000 -l /tmp/compare_send.log
+curl -s http://localhost:8080/stats/efficiency
+echo "=== iperf Test ==="
+h2 iperf -s &
+h1 iperf -c 192.168.8.41 -u -b 100M -t 60
+curl -s http://localhost:8080/stats/efficiency
+
+-D-ITG latency analysis for QoS validation-
+# Analyze latency patterns for QoS-aware testing
+ITGDec /tmp/qos_critical_recv.log | awk '/Delay/ {sum+=$3; count++} END {print "Average Delay:", sum/count, "ms"}'
+ITGDec /tmp/qos_high_recv.log | awk '/Delay/ {sum+=$3; count++} END {print "Average Delay:", sum/count, "ms"}'
+ITGDec /tmp/qos_normal_recv.log | awk '/Delay/ {sum+=$3; count++} END {print "Average Delay:", sum/count, "ms"}'
+
+-D-ITG jitter analysis-
+# Analyze jitter for real-time applications
+ITGDec /tmp/voip_recv.log | awk '/Jitter/ {sum+=$3; count++} END {print "Average Jitter:", sum/count, "ms"}'
+ITGDec /tmp/gaming_recv.log | awk '/Jitter/ {sum+=$3; count++} END {print "Average Jitter:", sum/count, "ms"}'
+
+-D-ITG packet loss analysis-
+# Check packet loss rates for different traffic types
+ITGDec /tmp/elephant1_send.log | grep "Packets sent"
+ITGDec /tmp/elephant_recv.log | grep "Packets received"
+ITGDec /tmp/mice1_send.log | grep "Packets sent"
+ITGDec /tmp/mice_recv.log | grep "Packets received"
+
+-D-ITG flow classification validation-
+# Verify flow classification is working correctly
+echo "=== Elephant Flow Stats ==="
+curl -s http://localhost:8080/debug/metrics | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+flows = data.get('flow_stats', {})
+for flow_key, stats in flows.items():
+    if stats.get('classification') == 'elephant':
+        print(f'Flow {flow_key}: {stats.get(\"throughput\", 0):.1f} Mbps')
+"
+
+echo "=== Mice Flow Stats ==="
+curl -s http://localhost:8080/debug/metrics | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+flows = data.get('flow_stats', {})
+for flow_key, stats in flows.items():
+    if stats.get('classification') == 'mice':
+        print(f'Flow {flow_key}: {stats.get(\"throughput\", 0):.1f} Mbps')
+"
+
+-continuous D-ITG monitoring script-
+# Real-time monitoring of D-ITG effectiveness
+watch -n 5 'echo "=== Controller Stats ==="; \
+curl -s http://localhost:8080/stats/efficiency | python3 -m json.tool; \
+echo "=== Active D-ITG Flows ==="; \
+ps aux | grep ITGSend | grep -v grep; \
+echo "=== Latest Log Entries ==="; \
+tail -n 2 /tmp/*send.log 2>/dev/null | grep -v "^$"'
+
+-D-ITG performance summary-
+# Generate comprehensive performance report
+echo "=== D-ITG Performance Summary ==="
+echo "1. Elephant Flow Performance:"
+ITGDec /tmp/elephant1_send.log | tail -n 5
+echo "2. Mice Flow Performance:"  
+ITGDec /tmp/mice1_send.log | tail -n 5
+echo "3. Controller Efficiency:"
+curl -s http://localhost:8080/stats/efficiency | python3 -m json.tool
+echo "4. Algorithm Status:"
+curl -s http://localhost:8080/stats/algorithm | python3 -m json.tool
+
+-cleanup D-ITG processes and logs-
+# Clean up all D-ITG processes and log files
+sudo pkill -f ITGSend
+sudo pkill -f ITGRecv
+rm -f /tmp/*.log
+echo "D-ITG cleanup completed"
 
 # ==================== TROUBLESHOOTING ====================
 
@@ -277,6 +603,191 @@ h3 iperf -c 192.168.8.43 -u -p 5002 -b 800M -t 120
 # Before: Check baseline efficiency score
 # During: Monitor real-time improvements
 # After: Analyze variance reduction
+
+# ==================== D-ITG ENHANCED ADAPTIVE MODE VALIDATION ====================
+
+-D-ITG scenario 1: 65%+ congestion avoidance validation-
+# Recreate the high-congestion scenario with D-ITG for precise control
+echo "=== Enhanced Adaptive Mode Validation (Target: 65%+ Congestion Avoidance) ==="
+
+# Set threshold to 100 Mbps for demonstration
+curl -X POST http://localhost:8080/config/threshold -H "Content-Type: application/json" -d '{"threshold": 100000000}'
+
+# Switch to enhanced adaptive mode
+curl -X POST http://localhost:8080/config/mode -H "Content-Type: application/json" -d '{"mode": "adaptive"}'
+
+# Start receivers for the stress test
+h5 ITGRecv -l /tmp/enhanced_recv1.log &
+h6 ITGRecv -l /tmp/enhanced_recv2.log &
+
+# Primary congestion flows (equivalent to user's iperf scenario)
+# 300 Mbps flows to create congestion
+h6 ITGSend -T UDP -a 192.168.8.44 -C 37500 -c 1000 -t 600000 -l /tmp/enhanced_300_1.log &
+h1 ITGSend -T UDP -a 192.168.8.45 -C 37500 -c 1000 -t 600000 -l /tmp/enhanced_300_2.log &
+
+# 500 Mbps flows to same destinations (creating severe congestion)
+h2 ITGSend -T UDP -a 192.168.8.44 -C 62500 -c 1000 -t 600000 -l /tmp/enhanced_500_1.log &
+h3 ITGSend -T UDP -a 192.168.8.45 -C 62500 -c 1000 -t 600000 -l /tmp/enhanced_500_2.log &
+
+# Monitor results every 30 seconds
+watch -n 30 'echo "=== Enhanced Adaptive Mode Performance ==="; \
+curl -s http://localhost:8080/stats/efficiency | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print(f\"Congestion Avoidance Rate: {data.get('\'congestion_avoidance_rate\'', 0):.1f}% (Target: 65%+)\")
+print(f\"Load Balancing Rate: {data.get('\'load_balancing_rate\'', 0):.1f}%\")
+print(f\"Efficiency Score: {data.get('\'efficiency_score\'', 0):.1f}%\")
+print(f\"Algorithm: {data.get('\'current_algorithm\'', '\'Unknown\'')}\")
+"'
+
+-D-ITG scenario 2: burst detection validation-
+# Test enhanced adaptive mode's burst detection capabilities
+echo "=== Burst Detection Validation ==="
+
+# Start receiver
+h2 ITGRecv -l /tmp/burst_validation_recv.log &
+
+# Create baseline traffic (5 Mbps)
+echo "Phase 1: Baseline traffic (5 Mbps for 60s)"
+h1 ITGSend -T UDP -a 192.168.8.41 -C 625 -c 1000 -t 60000 -l /tmp/burst_baseline.log &
+sleep 60
+
+# Create sudden burst (500 Mbps for 30 seconds)
+echo "Phase 2: Sudden burst (500 Mbps for 30s)"
+h1 ITGSend -T UDP -a 192.168.8.41 -C 62500 -c 1000 -t 30000 -l /tmp/burst_spike.log &
+sleep 30
+
+# Return to baseline (5 Mbps)
+echo "Phase 3: Return to baseline (5 Mbps)"
+h1 ITGSend -T UDP -a 192.168.8.41 -C 625 -c 1000 -t 60000 -l /tmp/burst_return.log
+
+# Check if burst was detected and avoided
+curl -s http://localhost:8080/stats/efficiency | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print('=== Burst Detection Results ===')
+print(f'Congestion Avoidance Rate: {data.get(\"congestion_avoidance_rate\", 0):.1f}%')
+print(f'Prediction Accuracy: {data.get(\"prediction_accuracy\", 0):.1f}%')
+"
+
+-D-ITG scenario 3: flow-aware integration test-
+# Validate flow-aware characteristics in enhanced adaptive mode
+echo "=== Flow-Aware Integration Test ==="
+
+# Start receivers
+h2 ITGRecv -l /tmp/flowaware_recv1.log &
+h3 ITGRecv -l /tmp/flowaware_recv2.log &
+h4 ITGRecv -l /tmp/flowaware_recv3.log &
+
+# Generate elephant flows (>10 Mbps)
+echo "Starting elephant flows..."
+h1 ITGSend -T UDP -a 192.168.8.41 -C 6250 -c 1000 -t 180000 -l /tmp/flowaware_elephant1.log &
+h5 ITGSend -T UDP -a 192.168.8.42 -C 7500 -c 1000 -t 180000 -l /tmp/flowaware_elephant2.log &
+
+# Generate mice flows (<1 Mbps)
+echo "Starting mice flows..."
+h6 ITGSend -T UDP -a 192.168.8.43 -C 50 -c 64 -t 180000 -l /tmp/flowaware_mice1.log &
+h2 ITGSend -T UDP -a 192.168.8.41 -C 75 -c 64 -t 180000 -l /tmp/flowaware_mice2.log &
+
+# Monitor flow classification and routing decisions
+watch -n 15 'echo "=== Flow-Aware Classification ==="; \
+curl -s http://localhost:8080/debug/metrics | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+flows = data.get('\'flow_stats\'', {})
+elephant_count = sum(1 for stats in flows.values() if stats.get('\'classification\'') == '\'elephant\'')
+mice_count = sum(1 for stats in flows.values() if stats.get('\'classification\'') == '\'mice\'')
+normal_count = sum(1 for stats in flows.values() if stats.get('\'classification\'') == '\'normal\'')
+print(f'\'Elephant flows: {elephant_count}\'')
+print(f'\'Mice flows: {mice_count}\'')
+print(f'\'Normal flows: {normal_count}\'')
+"'
+
+-D-ITG scenario 4: multi-method prediction validation-
+# Test the multi-method congestion prediction (Linear regression + EWMA + Rate-of-change)
+echo "=== Multi-Method Prediction Validation ==="
+
+# Start receiver
+h2 ITGRecv -l /tmp/prediction_recv.log &
+
+# Create predictable congestion pattern
+echo "Phase 1: Gradual increase (10 -> 50 -> 150 -> 300 Mbps)"
+
+# 10 Mbps for 2 minutes
+h1 ITGSend -T UDP -a 192.168.8.41 -C 1250 -c 1000 -t 120000 -l /tmp/predict_10mbps.log &
+sleep 120
+
+# 50 Mbps for 2 minutes
+h1 ITGSend -T UDP -a 192.168.8.41 -C 6250 -c 1000 -t 120000 -l /tmp/predict_50mbps.log &
+sleep 120
+
+# 150 Mbps for 2 minutes
+h1 ITGSend -T UDP -a 192.168.8.41 -C 18750 -c 1000 -t 120000 -l /tmp/predict_150mbps.log &
+sleep 120
+
+# 300 Mbps (should trigger prediction and avoidance)
+h1 ITGSend -T UDP -a 192.168.8.41 -C 37500 -c 1000 -t 120000 -l /tmp/predict_300mbps.log
+
+# Monitor prediction accuracy
+curl -s http://localhost:8080/stats/efficiency | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print('=== Prediction Validation Results ===')
+print(f'Congestion Avoidance Rate: {data.get(\"congestion_avoidance_rate\", 0):.1f}% (Enhanced target: 65%+)')
+print(f'Load Balancing Rate: {data.get(\"load_balancing_rate\", 0):.1f}%')
+print(f'Efficiency Score: {data.get(\"efficiency_score\", 0):.1f}%')
+print(f'Variance Improvement: {data.get(\"variance_improvement\", 0):.1f}%')
+"
+
+-D-ITG comprehensive validation report-
+# Generate final validation report for enhanced adaptive mode
+echo "=== ENHANCED ADAPTIVE MODE VALIDATION REPORT ==="
+echo "Timestamp: $(date)"
+echo ""
+
+echo "1. CONGESTION AVOIDANCE PERFORMANCE:"
+curl -s http://localhost:8080/stats/efficiency | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+avoidance_rate = data.get('congestion_avoidance_rate', 0)
+print(f'   Current Rate: {avoidance_rate:.1f}%')
+print(f'   Target Rate: 65%+')
+print(f'   Status: {\"✓ PASS\" if avoidance_rate >= 65 else \"✗ NEEDS IMPROVEMENT\"}')
+"
+
+echo ""
+echo "2. FLOW CLASSIFICATION:"
+curl -s http://localhost:8080/debug/metrics | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+flows = data.get('flow_stats', {})
+elephant_count = sum(1 for stats in flows.values() if stats.get('classification') == 'elephant')
+mice_count = sum(1 for stats in flows.values() if stats.get('classification') == 'mice')
+normal_count = sum(1 for stats in flows.values() if stats.get('classification') == 'normal')
+total_flows = len(flows)
+print(f'   Total Active Flows: {total_flows}')
+print(f'   Elephant Flows: {elephant_count} ({elephant_count/total_flows*100:.1f}%)' if total_flows > 0 else '   Elephant Flows: 0')
+print(f'   Mice Flows: {mice_count} ({mice_count/total_flows*100:.1f}%)' if total_flows > 0 else '   Mice Flows: 0')
+print(f'   Normal Flows: {normal_count} ({normal_count/total_flows*100:.1f}%)' if total_flows > 0 else '   Normal Flows: 0')
+"
+
+echo ""
+echo "3. OVERALL EFFICIENCY:"
+curl -s http://localhost:8080/stats/efficiency | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print(f'   Efficiency Score: {data.get(\"efficiency_score\", 0):.1f}%')
+print(f'   Load Balancing Rate: {data.get(\"load_balancing_rate\", 0):.1f}%')
+print(f'   Variance Improvement: {data.get(\"variance_improvement\", 0):.1f}%')
+"
+
+echo ""
+echo "4. D-ITG TRAFFIC SUMMARY:"
+echo "   Total D-ITG logs generated: $(ls /tmp/*.log 2>/dev/null | wc -l)"
+echo "   Active ITG processes: $(ps aux | grep -c ITG)"
+
+echo ""
+echo "=== VALIDATION COMPLETE ==="
 
 # ==================== USEFUL ALIASES ====================
 

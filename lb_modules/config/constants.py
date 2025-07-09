@@ -49,7 +49,13 @@ CONGESTION_PARAMS = {
     'trend_min_points': 3,
     'ewma_alpha': EWMA_ALPHA,
     'congestion_threshold': 0.8,    # 80% utilization
-    'prediction_threshold': 0.7     # 70% utilization for prediction
+    'prediction_threshold': 0.7,    # 70% utilization for prediction
+    'approaching_congestion_threshold': 0.7,  # 70% threshold for approaching congestion (was 30%)
+    'burst_detection_threshold': 0.5,  # 50% threshold for burst detection
+    'adaptive_prediction_weight': 0.6,  # 60% weight for prediction (was 30%)
+    'congestion_avoidance_bonus': 0.5,  # 50% bonus for avoiding congestion (was 30%)
+    'safety_margin_factor': 1.3,  # 30% safety margin for critical links
+    'gradient_weight': 0.2  # 20% weight for congestion gradient analysis
 }
 
 # Path selection weights
@@ -58,6 +64,20 @@ PATH_WEIGHTS = {
     'qos': QOS_WEIGHT,
     'utilization': 0.4,
     'reliability': 0.15
+}
+
+# Adaptive mode specific parameters
+ADAPTIVE_MODE_PARAMS = {
+    'congestion_prediction_weight': 0.6,  # Increased from 0.3 to 0.6
+    'congestion_avoidance_bonus': 0.5,    # Increased from 0.3 to 0.5
+    'approaching_congestion_factor': 0.7,  # Increased from 0.3 to 0.7
+    'congestion_penalty_multiplier': 0.8,  # Heavy penalty for congested links
+    'burst_detection_sensitivity': 0.3,    # Sensitivity for burst detection
+    'gradient_analysis_weight': 0.15,      # Weight for congestion gradient
+    'flow_aware_integration': True,        # Enable flow-aware characteristics
+    'adaptive_threshold_adjustment': True,  # Enable dynamic threshold adjustment
+    'exponential_penalty_factor': 2.0,     # Exponential penalty for heavy congestion
+    'multi_level_scoring': True            # Enable multi-level congestion scoring
 }
 
 # Load distribution calculation constants

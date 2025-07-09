@@ -6,11 +6,17 @@ Advanced congestion prediction algorithms using multiple techniques:
 - Linear regression
 - Exponential weighted moving average (EWMA)
 - Rate of change analysis
+- Burst detection
+- Adaptive weight adjustment
+- Congestion gradient analysis
 """
 
 import collections
 import time
-from ..config.constants import CONGESTION_PREDICTION_WINDOW, EWMA_ALPHA
+import math
+from ..config.constants import (
+    CONGESTION_PREDICTION_WINDOW, EWMA_ALPHA, CONGESTION_PARAMS, ADAPTIVE_MODE_PARAMS
+)
 
 
 class CongestionPredictor:
@@ -25,13 +31,25 @@ class CongestionPredictor:
         # EWMA state
         self.congestion_ewma = collections.defaultdict(float)  # (dpid, port) -> EWMA value
         
-        # Update parent app reference
+        # Enhanced prediction state
+        self.burst_detection_state = collections.defaultdict(dict)  # (dpid, port) -> burst info
+        self.adaptive_weights = collections.defaultdict(dict)  # (dpid, port) -> prediction weights
+        self.congestion_gradients = collections.defaultdict(list)  # (dpid, port) -> gradient history
+        self.network_congestion_level = 0.0  # Global network congestion level
+        self.adaptive_thresholds = collections.defaultdict(float)  # (dpid, port) -> adaptive threshold
+        
+        # Update parent app references
         self.parent_app.congestion_ewma = self.congestion_ewma
+        self.parent_app.burst_detection_state = self.burst_detection_state
+        self.parent_app.adaptive_weights = self.adaptive_weights
+        self.parent_app.congestion_gradients = self.congestion_gradients
+        self.parent_app.network_congestion_level = self.network_congestion_level
+        self.parent_app.adaptive_thresholds = self.adaptive_thresholds
     
     def predict_congestion(self, dpid, port, now):
         """
         Enhanced congestion prediction using EWMA and multiple algorithms.
-        Combines linear regression with exponential weighted moving average for better accuracy.
+        Combines linear regression, EWMA, rate of change, burst detection, and adaptive weighting.
         """
         trends = self.parent_app.congestion_trends.get((dpid, port), [])
         link_key = (dpid, port)
@@ -56,23 +74,32 @@ class CongestionPredictor:
         
         ewma_value = self.congestion_ewma[link_key]
         
-        # Method 1: Linear regression prediction
+        # Enhanced prediction methods
         linear_prediction = self._linear_regression_prediction(recent_trends)
-        
-        # Method 2: EWMA-based prediction
         ewma_prediction = self._ewma_prediction(current_util, ewma_value)
-        
-        # Method 3: Rate of change prediction
         rate_prediction = self._rate_of_change_prediction(recent_trends)
         
-        # Combine predictions with weights
-        combined_prediction = self._combine_predictions(
-            linear_prediction, ewma_prediction, rate_prediction
+        # New enhancement: Burst detection
+        burst_factor = self._detect_burst_pattern(link_key, recent_trends, now)
+        
+        # New enhancement: Congestion gradient analysis
+        gradient_prediction = self._congestion_gradient_prediction(link_key, recent_trends)
+        
+        # Adaptive weight adjustment based on network conditions
+        adaptive_weights = self._calculate_adaptive_weights(link_key, recent_trends)
+        
+        # Enhanced prediction combination
+        combined_prediction = self._combine_enhanced_predictions(
+            linear_prediction, ewma_prediction, rate_prediction, 
+            gradient_prediction, burst_factor, adaptive_weights
         )
         
-        # Add safety margin for critical links
-        if current_util > self.parent_app.THRESHOLD_BPS * 0.7:
-            combined_prediction *= 1.2  # 20% safety margin
+        # Dynamic safety margin based on network congestion level
+        safety_factor = self._calculate_safety_factor(current_util, link_key)
+        combined_prediction *= safety_factor
+        
+        # Update adaptive threshold for this link
+        self._update_adaptive_threshold(link_key, current_util, combined_prediction)
         
         return max(0, combined_prediction)
     
@@ -135,6 +162,186 @@ class CongestionPredictor:
             return (0.6 * linear_prediction + 0.4 * ewma_prediction)
         else:
             return ewma_prediction
+    
+    def _detect_burst_pattern(self, link_key, recent_trends, now):
+        """Detect burst patterns in traffic for rapid congestion onset"""
+        if len(recent_trends) < 3:
+            return 1.0  # No burst detected
+        
+        # Initialize burst state if not exists
+        if link_key not in self.burst_detection_state:
+            self.burst_detection_state[link_key] = {
+                'last_burst_time': 0,
+                'burst_intensity': 0,
+                'baseline_util': 0
+            }
+        
+        burst_state = self.burst_detection_state[link_key]
+        current_util = recent_trends[-1][1]
+        
+        # Update baseline utilization (slower-changing average)
+        if burst_state['baseline_util'] == 0:
+            burst_state['baseline_util'] = current_util
+        else:
+            # Very slow update for baseline
+            burst_state['baseline_util'] = (0.95 * burst_state['baseline_util'] + 
+                                          0.05 * current_util)
+        
+        # Detect burst: current utilization significantly above baseline
+        burst_threshold = burst_state['baseline_util'] * (1 + ADAPTIVE_MODE_PARAMS['burst_detection_sensitivity'])
+        
+        if current_util > burst_threshold:
+            # Burst detected
+            burst_intensity = (current_util - burst_state['baseline_util']) / burst_state['baseline_util']
+            burst_state['burst_intensity'] = min(burst_intensity, 3.0)  # Cap at 3x
+            burst_state['last_burst_time'] = now
+            
+            # Return burst factor (higher factor = more aggressive prediction)
+            return 1.0 + burst_state['burst_intensity']
+        else:
+            # Decay burst intensity
+            time_since_burst = now - burst_state['last_burst_time']
+            if time_since_burst > 5:  # 5 seconds decay
+                burst_state['burst_intensity'] *= 0.9
+            
+            return 1.0 + max(0, burst_state['burst_intensity'])
+    
+    def _congestion_gradient_prediction(self, link_key, recent_trends):
+        """Analyze congestion gradient for trend prediction"""
+        if len(recent_trends) < 4:
+            return 0
+        
+        # Calculate gradient over the last few samples
+        gradients = []
+        for i in range(len(recent_trends) - 3, len(recent_trends)):
+            if i > 0:
+                dt = recent_trends[i][0] - recent_trends[i-1][0]
+                du = recent_trends[i][1] - recent_trends[i-1][1]
+                if dt > 0:
+                    gradients.append(du / dt)
+        
+        if not gradients:
+            return 0
+        
+        # Store gradient history
+        if link_key not in self.congestion_gradients:
+            self.congestion_gradients[link_key] = []
+        
+        self.congestion_gradients[link_key].extend(gradients)
+        
+        # Keep only recent gradients
+        max_gradient_history = 10
+        if len(self.congestion_gradients[link_key]) > max_gradient_history:
+            self.congestion_gradients[link_key] = self.congestion_gradients[link_key][-max_gradient_history:]
+        
+        # Calculate average gradient
+        avg_gradient = sum(self.congestion_gradients[link_key]) / len(self.congestion_gradients[link_key])
+        
+        # Predict utilization based on gradient
+        prediction_horizon = 5  # 5 seconds ahead
+        current_util = recent_trends[-1][1]
+        
+        return max(0, current_util + avg_gradient * prediction_horizon)
+    
+    def _calculate_adaptive_weights(self, link_key, recent_trends):
+        """Calculate adaptive weights based on prediction accuracy and network conditions"""
+        if link_key not in self.adaptive_weights:
+            # Initialize with default weights
+            self.adaptive_weights[link_key] = {
+                'linear': 0.4,
+                'ewma': 0.35,
+                'rate': 0.25,
+                'gradient': ADAPTIVE_MODE_PARAMS['gradient_analysis_weight']
+            }
+        
+        weights = self.adaptive_weights[link_key]
+        
+        # Adapt weights based on recent prediction accuracy
+        # This is a simplified adaptation - in practice, you'd track prediction errors
+        
+        # If we have enough data, adjust weights based on volatility
+        if len(recent_trends) >= 5:
+            # Calculate volatility (standard deviation of recent changes)
+            recent_utils = [util for _, util in recent_trends[-5:]]
+            if len(recent_utils) > 1:
+                mean_util = sum(recent_utils) / len(recent_utils)
+                variance = sum((u - mean_util) ** 2 for u in recent_utils) / len(recent_utils)
+                volatility = math.sqrt(variance)
+                
+                # High volatility: increase rate-of-change weight
+                if volatility > self.parent_app.THRESHOLD_BPS * 0.1:
+                    weights['rate'] = min(0.4, weights['rate'] + 0.05)
+                    weights['linear'] = max(0.2, weights['linear'] - 0.025)
+                    weights['ewma'] = max(0.2, weights['ewma'] - 0.025)
+                
+                # Low volatility: increase EWMA weight
+                elif volatility < self.parent_app.THRESHOLD_BPS * 0.05:
+                    weights['ewma'] = min(0.5, weights['ewma'] + 0.05)
+                    weights['rate'] = max(0.15, weights['rate'] - 0.025)
+                    weights['linear'] = max(0.25, weights['linear'] - 0.025)
+        
+        return weights
+    
+    def _combine_enhanced_predictions(self, linear_prediction, ewma_prediction, rate_prediction, 
+                                    gradient_prediction, burst_factor, adaptive_weights):
+        """Enhanced prediction combination with adaptive weights and burst detection"""
+        
+        # Base prediction using adaptive weights
+        base_prediction = (
+            adaptive_weights['linear'] * linear_prediction +
+            adaptive_weights['ewma'] * ewma_prediction +
+            adaptive_weights['rate'] * rate_prediction +
+            adaptive_weights['gradient'] * gradient_prediction
+        )
+        
+        # Apply burst factor
+        enhanced_prediction = base_prediction * burst_factor
+        
+        # If any prediction method shows high congestion, be more aggressive
+        max_prediction = max(linear_prediction, ewma_prediction, rate_prediction, gradient_prediction)
+        if max_prediction > self.parent_app.THRESHOLD_BPS * 0.8:
+            # Aggressive prediction when any method shows high congestion
+            enhanced_prediction = max(enhanced_prediction, max_prediction * 1.2)
+        
+        return enhanced_prediction
+    
+    def _calculate_safety_factor(self, current_util, link_key):
+        """Calculate dynamic safety factor based on current utilization and network state"""
+        base_safety = CONGESTION_PARAMS['safety_margin_factor']
+        
+        # Increase safety factor for links approaching congestion
+        if current_util > self.parent_app.THRESHOLD_BPS * CONGESTION_PARAMS['prediction_threshold']:
+            congestion_ratio = current_util / self.parent_app.THRESHOLD_BPS
+            additional_safety = 0.3 * congestion_ratio  # Up to 30% additional safety
+            return base_safety + additional_safety
+        
+        return base_safety
+    
+    def _update_adaptive_threshold(self, link_key, current_util, prediction):
+        """Update adaptive threshold for this link based on historical patterns"""
+        if not ADAPTIVE_MODE_PARAMS['adaptive_threshold_adjustment']:
+            return
+        
+        # Initialize adaptive threshold if not exists
+        if link_key not in self.adaptive_thresholds:
+            self.adaptive_thresholds[link_key] = self.parent_app.THRESHOLD_BPS
+        
+        # Gradually adjust threshold based on utilization patterns
+        target_threshold = self.parent_app.THRESHOLD_BPS
+        
+        # If link consistently operates at high utilization, increase threshold slightly
+        if current_util > self.parent_app.THRESHOLD_BPS * 0.8:
+            target_threshold = self.parent_app.THRESHOLD_BPS * 1.1
+        
+        # If link has low utilization, decrease threshold for more sensitive detection
+        elif current_util < self.parent_app.THRESHOLD_BPS * 0.3:
+            target_threshold = self.parent_app.THRESHOLD_BPS * 0.9
+        
+        # Slowly adjust toward target (prevents oscillation)
+        self.adaptive_thresholds[link_key] = (
+            0.95 * self.adaptive_thresholds[link_key] + 
+            0.05 * target_threshold
+        )
     
     def get_congestion_trend(self, dpid, port):
         """Get the congestion trend for a specific link"""
