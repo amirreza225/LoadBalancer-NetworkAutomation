@@ -9,6 +9,7 @@ including load balancing rates, congestion avoidance, and variance analysis.
 import time
 import collections
 from .path_congestion_calculator import PathCongestionCalculator
+from .load_distribution_calculator import LoadDistributionCalculator
 
 
 class EfficiencyTracker:
@@ -22,6 +23,12 @@ class EfficiencyTracker:
         
         # Initialize path-based congestion calculator
         self.path_calculator = PathCongestionCalculator(parent_app)
+        
+        # Initialize load distribution calculator for proper load balancing metrics
+        self.load_distribution_calculator = LoadDistributionCalculator(
+            window_size_sec=60,  # 1-minute window for load balancing calculations
+            min_samples=5
+        )
         
         # Initialize efficiency metrics
         self.efficiency_metrics = {
@@ -335,14 +342,29 @@ class EfficiencyTracker:
     
     def calculate_efficiency_metrics(self, now):
         """Calculate and update efficiency metrics with bounds checking."""
-        # Calculate load balancing rate with validation
+        # Update load distribution calculator with current link utilizations
+        self._update_load_distribution_data(now)
+        
+        # Get proper load balancing metrics based on traffic distribution
+        load_distribution_metrics = self.load_distribution_calculator.calculate_load_balancing_effectiveness()
+        
+        # Use traffic-based load balancing effectiveness as primary metric
+        load_balancing_rate = load_distribution_metrics.get('load_balancing_effectiveness', 0.0)
+        
+        # Keep legacy flow-based calculation for comparison/fallback
         if self.efficiency_metrics['total_flows'] > 0:
-            load_balancing_rate = (self.efficiency_metrics['load_balanced_flows'] / 
-                                 self.efficiency_metrics['total_flows']) * 100
-            # Cap at 100% to prevent calculation errors
-            load_balancing_rate = min(100.0, max(0.0, load_balancing_rate))
+            legacy_load_balancing_rate = (self.efficiency_metrics['load_balanced_flows'] / 
+                                        self.efficiency_metrics['total_flows']) * 100
+            legacy_load_balancing_rate = min(100.0, max(0.0, legacy_load_balancing_rate))
         else:
-            load_balancing_rate = 0
+            legacy_load_balancing_rate = 0
+            
+        # Log comparison between old and new calculations
+        self.logger.info("Load balancing metrics - New (traffic-based): %.1f%%, Legacy (flow-based): %.1f%%",
+                        load_balancing_rate, legacy_load_balancing_rate)
+        
+        # Store additional load distribution metrics for API access
+        self.load_distribution_metrics = load_distribution_metrics
         
         # NEW: Use path-based congestion avoidance calculation
         path_congestion_avoidance = self.path_calculator.calculate_path_congestion_avoidance(now)
@@ -439,6 +461,40 @@ class EfficiencyTracker:
             return max(0, improvement)  # Don't show negative improvement
         
         return 0
+    
+    def _update_load_distribution_data(self, now):
+        """Update the load distribution calculator with current link utilizations."""
+        try:
+            # Get current link loads from traffic monitor
+            if hasattr(self.parent_app, 'traffic_monitor'):
+                link_loads = self.parent_app.traffic_monitor.get_all_link_loads(now)
+                
+                # Convert to the format expected by load distribution calculator
+                # link_loads format: {"1-2": utilization_value, "2-3": utilization_value, ...}
+                formatted_loads = {}
+                for link_str, load in link_loads.items():
+                    # Parse the link string "dpid1-dpid2" 
+                    try:
+                        dpid1_str, dpid2_str = link_str.split('-')
+                        dpid1, dpid2 = int(dpid1_str), int(dpid2_str)
+                        # Use tuple format (min_dpid, max_dpid) for consistency
+                        link_key = (min(dpid1, dpid2), max(dpid1, dpid2))
+                        formatted_loads[link_key] = load
+                    except (ValueError, TypeError) as parse_error:
+                        self.logger.debug("Could not parse link string '%s': %s", link_str, parse_error)
+                        continue
+                
+                # Update the load distribution calculator
+                if formatted_loads:
+                    self.load_distribution_calculator.update_link_utilization(formatted_loads, now)
+                    self.logger.debug("Updated load distribution calculator with %d links", len(formatted_loads))
+                else:
+                    self.logger.debug("No link load data available for load distribution calculation")
+            else:
+                self.logger.debug("Traffic monitor not available for load distribution calculation")
+                
+        except Exception as e:
+            self.logger.error("Error updating load distribution data: %s", e)
     
     def _calculate_variance(self, values):
         """Calculate variance of a list of values."""

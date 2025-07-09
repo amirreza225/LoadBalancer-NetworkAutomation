@@ -164,6 +164,42 @@ class LBRestController(ControllerBase):
                 'avg_path_length_lb': self.lb.efficiency_metrics.get('avg_path_length_lb', 0),
                 'avg_path_length_sp': self.lb.efficiency_metrics.get('avg_path_length_sp', 0)
             }
+            
+            # Add enhanced load distribution metrics if available
+            if hasattr(self.lb, 'efficiency_tracker') and hasattr(self.lb.efficiency_tracker, 'load_distribution_metrics'):
+                load_dist_metrics = self.lb.efficiency_tracker.load_distribution_metrics
+                stats['load_distribution'] = {
+                    'coefficient_of_variation': load_dist_metrics.get('coefficient_of_variation', 0),
+                    'distribution_entropy': load_dist_metrics.get('distribution_entropy', 0),
+                    'utilization_std_dev': load_dist_metrics.get('utilization_std_dev', 0),
+                    'load_balancing_effectiveness': load_dist_metrics.get('load_balancing_effectiveness', 0),
+                    'variance_reduction': load_dist_metrics.get('variance_reduction', 0),
+                    'utilization_balance_score': load_dist_metrics.get('utilization_balance_score', 0),
+                    'time_weighted_lb_rate': load_dist_metrics.get('time_weighted_lb_rate', 0),
+                    'avg_utilization': load_dist_metrics.get('avg_utilization', 0),
+                    'max_utilization': load_dist_metrics.get('max_utilization', 0),
+                    'min_utilization': load_dist_metrics.get('min_utilization', 0),
+                    'utilization_range': load_dist_metrics.get('utilization_range', 0)
+                }
+                
+                # Override legacy load_balancing_rate with traffic-based calculation
+                stats['load_balancing_rate'] = load_dist_metrics.get('load_balancing_effectiveness', 0)
+                stats['legacy_load_balancing_rate'] = self.lb.efficiency_metrics.get('load_balancing_rate', 0)
+            else:
+                # Fallback to empty metrics
+                stats['load_distribution'] = {
+                    'coefficient_of_variation': 0,
+                    'distribution_entropy': 0,
+                    'utilization_std_dev': 0,
+                    'load_balancing_effectiveness': 0,
+                    'variance_reduction': 0,
+                    'utilization_balance_score': 0,
+                    'time_weighted_lb_rate': 0,
+                    'avg_utilization': 0,
+                    'max_utilization': 0,
+                    'min_utilization': 0,
+                    'utilization_range': 0
+                }
         
         # Add additional event details for dashboard (percentage already calculated correctly by efficiency tracker)
         total_events = getattr(self.lb, 'total_congestion_avoidance_events', 0)
@@ -224,6 +260,47 @@ class LBRestController(ControllerBase):
         }
         
         return self._cors(json.dumps(stats))
+    
+    @route('load_distribution', '/stats/load_distribution', methods=['GET'])
+    def load_distribution_stats(self, req, **_):
+        """Get detailed load distribution metrics"""
+        try:
+            if hasattr(self.lb, 'efficiency_tracker') and hasattr(self.lb.efficiency_tracker, 'load_distribution_calculator'):
+                calc = self.lb.efficiency_tracker.load_distribution_calculator
+                
+                # Get comprehensive load distribution summary
+                summary = calc.get_network_load_summary()
+                
+                # Add calculation methodology information
+                summary['methodology'] = {
+                    'calculation_type': 'traffic_distribution_based',
+                    'time_window_sec': calc.window_size_sec,
+                    'min_samples_required': calc.min_samples,
+                    'metrics_explanations': {
+                        'coefficient_of_variation': 'Lower values indicate better load balancing (std_dev/mean)',
+                        'distribution_entropy': 'Higher values indicate better load balancing (0-1 normalized)',
+                        'load_balancing_effectiveness': 'Overall effectiveness percentage (0-100%)',
+                        'utilization_balance_score': 'How evenly traffic is distributed (0-100%)',
+                        'variance_reduction': 'Improvement over shortest-path routing (%)'
+                    }
+                }
+                
+                return self._cors(json.dumps(summary))
+            else:
+                return self._cors(json.dumps({
+                    'error': 'Load distribution calculator not available',
+                    'load_distribution': {
+                        'coefficient_of_variation': 0,
+                        'distribution_entropy': 0,
+                        'load_balancing_effectiveness': 0,
+                        'utilization_balance_score': 0,
+                        'variance_reduction': 0
+                    }
+                }))
+                
+        except Exception as e:
+            self.lb.logger.error("Error getting load distribution stats: %s", e)
+            return self._cors(json.dumps({'error': str(e)}), 500)
     
     @route('threshold_get', '/config/threshold', methods=['GET'])
     def get_threshold(self, req, **_):

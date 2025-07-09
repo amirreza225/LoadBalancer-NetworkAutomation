@@ -250,11 +250,22 @@ function updateMetricsDisplay(metrics) {
   // Total flows processed (displayed as "Total Flows Processed")
   updateMetric("loadBalancedFlows", metrics.total_flows || 0);
 
-  // Load balancing rate
+  // Load balancing rate - use traffic-based calculation if available
+  const loadBalancingRate = metrics.load_distribution?.load_balancing_effectiveness || metrics.load_balancing_rate || 0;
+  const legacyRate = metrics.legacy_load_balancing_rate;
+  
   updateMetric(
     "loadBalancingRate",
-    `${(metrics.load_balancing_rate || 0).toFixed(1)}%`
+    `${loadBalancingRate.toFixed(1)}%`,
+    loadBalancingRate > 80 ? "excellent" : 
+    loadBalancingRate > 60 ? "good" : 
+    loadBalancingRate > 30 ? "fair" : "poor"
   );
+  
+  // Log comparison if both metrics are available
+  if (legacyRate !== undefined && Math.abs(loadBalancingRate - legacyRate) > 5) {
+    console.log(`Load balancing: Traffic-based: ${loadBalancingRate.toFixed(1)}%, Flow-based: ${legacyRate.toFixed(1)}%`);
+  }
 
   // Congestion avoidance percentage (enhanced algorithm)
   const congestionPercentage =
@@ -310,6 +321,9 @@ function updateMetricsDisplay(metrics) {
       ? "fair"
       : "poor"
   );
+  
+  // Update additional load distribution metrics
+  updateLoadDistributionMetrics(metrics);
 }
 
 // Update algorithm information
@@ -479,6 +493,73 @@ function resetCongestionTrends() {
   if (currentValueElement) {
     currentValueElement.textContent = "0%";
     currentValueElement.style.color = "#007bff";
+  }
+}
+
+// Update additional load distribution metrics display
+function updateLoadDistributionMetrics(metrics) {
+  if (!metrics.load_distribution) {
+    return; // No load distribution data available
+  }
+  
+  const loadDist = metrics.load_distribution;
+  
+  // Log detailed load distribution metrics for debugging
+  console.log("Load Distribution Metrics:", {
+    coefficient_of_variation: loadDist.coefficient_of_variation,
+    distribution_entropy: loadDist.distribution_entropy,
+    utilization_balance_score: loadDist.utilization_balance_score,
+    variance_reduction: loadDist.variance_reduction,
+    avg_utilization: loadDist.avg_utilization,
+    utilization_range: loadDist.utilization_range
+  });
+  
+  // Add visual indicators for load distribution quality
+  const loadBalancingElement = document.getElementById("loadBalancingRate");
+  if (loadBalancingElement && loadBalancingElement.parentElement) {
+    const parentCard = loadBalancingElement.parentElement;
+    
+    // Add a title attribute with detailed explanation
+    const cv = loadDist.coefficient_of_variation || 0;
+    const entropy = loadDist.distribution_entropy || 0;
+    
+    parentCard.title = 
+      `Traffic-based Load Balancing Effectiveness\n` +
+      `• Coefficient of Variation: ${cv.toFixed(3)} (lower = better)\n` +
+      `• Distribution Entropy: ${entropy.toFixed(3)} (higher = better)\n` +
+      `• Balance Score: ${(loadDist.utilization_balance_score || 0).toFixed(1)}%\n` +
+      `• Variance Reduction: ${(loadDist.variance_reduction || 0).toFixed(1)}%\n` +
+      `• Avg Utilization: ${(loadDist.avg_utilization / 1000000 || 0).toFixed(1)} Mbps`;
+    
+    // Add visual indicator for calculation method
+    if (!parentCard.querySelector('.calc-method-indicator')) {
+      const indicator = document.createElement('div');
+      indicator.className = 'calc-method-indicator';
+      indicator.style.cssText = `
+        position: absolute;
+        top: 4px;
+        right: 4px;
+        width: 8px;
+        height: 8px;
+        background: #3b82f6;
+        border-radius: 50%;
+        title: Traffic-based calculation
+      `;
+      indicator.title = 'Traffic-based calculation';
+      parentCard.style.position = 'relative';
+      parentCard.appendChild(indicator);
+    }
+  }
+  
+  // Update variance improvement with new calculation if available
+  if (loadDist.variance_reduction !== undefined) {
+    updateMetric(
+      "varianceImprovement", 
+      `${loadDist.variance_reduction.toFixed(1)}%`,
+      loadDist.variance_reduction > 50 ? "excellent" :
+      loadDist.variance_reduction > 25 ? "good" :
+      loadDist.variance_reduction > 10 ? "fair" : "poor"
+    );
   }
 }
 

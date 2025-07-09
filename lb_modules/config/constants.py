@@ -59,3 +59,26 @@ PATH_WEIGHTS = {
     'utilization': 0.4,
     'reliability': 0.15
 }
+
+# Load distribution calculation constants
+LOAD_DISTRIBUTION_WINDOW_SEC = 60  # Time window for load balancing effectiveness calculation
+LOAD_DISTRIBUTION_MIN_SAMPLES = 5  # Minimum samples required for reliable calculation
+LOAD_DISTRIBUTION_UPDATE_INTERVAL = 2  # Update interval in seconds
+
+# Load balancing effectiveness thresholds
+EXCELLENT_LOAD_BALANCING_THRESHOLD = 80  # Above this % is considered excellent
+GOOD_LOAD_BALANCING_THRESHOLD = 60      # Above this % is considered good  
+FAIR_LOAD_BALANCING_THRESHOLD = 30      # Above this % is considered fair
+# Below fair threshold is considered poor
+
+# Coefficient of variation thresholds (lower is better)
+EXCELLENT_CV_THRESHOLD = 0.2  # CV below this is excellent balance
+GOOD_CV_THRESHOLD = 0.4       # CV below this is good balance
+FAIR_CV_THRESHOLD = 0.8       # CV below this is fair balance
+# CV above fair threshold indicates poor balance
+
+# Distribution entropy thresholds (higher is better, normalized 0-1)
+EXCELLENT_ENTROPY_THRESHOLD = 0.8  # Entropy above this is excellent
+GOOD_ENTROPY_THRESHOLD = 0.6       # Entropy above this is good
+FAIR_ENTROPY_THRESHOLD = 0.4       # Entropy above this is fair
+# Entropy below fair threshold indicates poor distribution
