@@ -7,21 +7,25 @@
 
 # ==================== SYSTEM SETUP ====================
 
--install dependencies-
+-install D-ITG dependencies-
 sudo apt update
-sudo apt install mininet python3-pip curl build-essential gcc g++ make wget unzip
-pip3 install ryu
+sudo apt install build-essential gcc g++ make wget unzip
 
--install D-ITG-
+-download and install D-ITG-
 cd /tmp
 wget http://traffic.comics.unina.it/software/ITG/codice/D-ITG-2.8.1-r1023-src.zip
 unzip D-ITG-2.8.1-r1023-src.zip
 cd D-ITG-2.8.1-r1023/src
 make
-sudo cp ../bin/ITG* /usr/local/bin/
+
+-install D-ITG binaries-
+sudo cp ../bin/ITGSend /usr/local/bin/
+sudo cp ../bin/ITGRecv /usr/local/bin/
+sudo cp ../bin/ITGLog /usr/local/bin/
+sudo cp ../bin/ITGDec /usr/local/bin/
 sudo chmod +x /usr/local/bin/ITG*
 
--verify installation-
+-verify D-ITG installation-
 which ITGSend ITGRecv ITGLog ITGDec
 ITGSend -h
 
