@@ -11,159 +11,35 @@
     <script src="topology.js" defer></script>
     <script src="efficiency.js" defer></script>
     <link rel="stylesheet" href="./bootstrap-grid.css" />
-    <style>
-      body {
-        font-family: sans-serif;
-        margin: 0;
-      }
-      canvas {
-        max-width: 1000px;
-        margin-bottom: 20px;
-      }
-      #legend {
-        margin-top: 10px;
-        text-align: center;
-      }
-      #legend span {
-        display: inline-block;
-        height: 12px;
-        margin-right: 4px;
-      }
-      h1 {
-        background-color: #235b8b;
-        border-radius: 5px;
-        padding: 15px;
-        color: #fff;
-      }
-      h3 {
-        border-bottom: 1px solid;
-        padding-bottom: 5px;
-        color: #0d385c;
-      }
-      #controls {
-        text-align: center;
-      }
-      button#toggle {
-        margin: 0 10px;
-        padding: 5px 15px;
-        background-color: #ff7f00;
-        border: 0;
-        border-radius: 5px;
-        color: #fff;
-        vertical-align: middle;
-        cursor: pointer;
-      }
-      button#toggle:hover {
-        background-color: #bd5e00;
-      }
-      button#toggle.resume {
-        background-color: rgb(32, 133, 32);
-      }
-      button#toggle.resume:hover {
-        background-color: rgb(22, 94, 22);
-      }
-      #hotLinks,
-      #path {
-        list-style: none;
-        padding: 0;
-      }
-      #path {
-        list-style: none;
-        padding: 0;
-        font-size: small;
-      }
-      #controls {
-        position: absolute;
-        text-align: center;
-        padding: 5px;
-        border: 1px solid #aaa;
-        border-radius: 10px;
-        background: #fff;
-        color: #000;
-        display: inline-block;
-        right: 15px;
-        top: 50%;
-        transform: translateY(-50%);
-      }
-      .header {
-        position: relative;
-      }
-      footer {
-        text-align: center;
-        padding: 10px;
-        background-color: #235b8b;
-        color: white;
-        display: block;
-        width: 100%;
-        margin-top: 15px;
-      }
-
-      /* Efficiency metrics styles */
-      .efficiency-container {
-        background: #f8f9fa;
-        border-radius: 8px;
-        padding: 15px;
-        margin: 10px 0;
-      }
-
-      .metrics-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-        gap: 15px;
-        margin-top: 15px;
-      }
-
-      .metric-card {
-        background: white;
-        border-radius: 6px;
-        padding: 12px;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-        text-align: center;
-      }
-
-      .metric-value {
-        font-size: 1.5em;
-        font-weight: bold;
-        margin: 5px 0;
-      }
-
-      .metric-label {
-        font-size: 0.9em;
-        color: #666;
-      }
-
-      .excellent {
-        color: #28a745;
-      }
-      .good {
-        color: #007bff;
-      }
-      .fair {
-        color: #ffc107;
-      }
-      .poor {
-        color: #dc3545;
-      }
-      .warning {
-        color: #fd7e14;
-      }
-    </style>
+    <link rel="stylesheet" href="./dashboard.css" />
   </head>
   <body>
     <div class="container">
-      <div class="header">
+      <header class="dashboard-header">
         <h1>SDN Load Balancer Dashboard</h1>
-        <div id="controls">
-          <button id="toggle">Pause</button>
-          <label
-            >Threshold
-            <input type="range" id="thSlider" min="5" max="1000" step="5" />
-            <span id="thVal"></span> Mbps</label
-          >
-          <br /><br />
-          <label
-            >Mode
-            <select id="modeSelect">
+        <div class="controls-panel">
+          <div class="control-group">
+            <button id="toggle" class="btn btn-primary">Pause</button>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">Congestion Threshold</label>
+            <div class="range-container">
+              <input
+                type="range"
+                id="thSlider"
+                class="range-input"
+                min="5"
+                max="1000"
+                step="5"
+              />
+              <span class="range-value"><span id="thVal"></span> Mbps</span>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">Load Balancing Mode</label>
+            <select id="modeSelect" class="form-select">
               <option value="adaptive">Adaptive</option>
               <option value="least_loaded">Least Loaded</option>
               <option value="weighted_ecmp">Weighted ECMP</option>
@@ -171,19 +47,28 @@
               <option value="latency_aware">Latency Aware</option>
               <option value="qos_aware">QoS Aware</option>
               <option value="flow_aware">Flow Aware</option>
-            </select></label
-          >
+            </select>
+          </div>
         </div>
-      </div>
+      </header>
 
       <!-- Efficiency Metrics Section -->
-      <div class="efficiency-container">
-        <h3>Load Balancer Efficiency</h3>
+      <section class="dashboard-section">
+        <div class="section-header">
+          <h3>Load Balancer Efficiency</h3>
+        </div>
         <div class="row">
-          <div class="col-lg-4">
-            <canvas id="efficiencyChart" width="300" height="200"></canvas>
+          <div class="col-lg-5">
+            <div class="chart-container">
+              <canvas
+                id="efficiencyChart"
+                class="chart-canvas"
+                width="350"
+                height="350"
+              ></canvas>
+            </div>
           </div>
-          <div class="col-lg-8">
+          <div class="col-lg-7">
             <div class="metrics-grid">
               <div class="metric-card">
                 <div class="metric-value" id="efficiencyScore">-</div>
@@ -201,7 +86,7 @@
                 <div class="metric-value" id="congestionAvoidancePercentage">
                   0%
                 </div>
-                <div class="metric-label">Congestion Avoidance %</div>
+                <div class="metric-label">Congestion Avoidance</div>
               </div>
               <div class="metric-card">
                 <div class="metric-value" id="varianceImprovement">0%</div>
@@ -214,149 +99,144 @@
             </div>
           </div>
         </div>
-      </div>
+      </section>
 
       <!-- Congestion Avoidance Trends Display -->
-      <div class="efficiency-container">
-        <h3>Congestion Avoidance Trends</h3>
+      <section class="dashboard-section">
+        <div class="section-header">
+          <h3>Congestion Avoidance Trends</h3>
+        </div>
         <div class="row">
           <div class="col-lg-12">
             <div id="congestionTrendsContainer"></div>
           </div>
         </div>
-      </div>
+      </section>
 
-      <div class="row">
-        <div class="col-lg-3 currentpaths">
-          <h3>Current Paths:</h3>
-          <ul id="path"></ul>
+      <!-- Real-time Performance Monitoring -->
+      <section class="dashboard-section">
+        <div class="section-header">
+          <h3>Real-time Performance Monitoring</h3>
         </div>
-        <canvas
-          class="col-lg-9"
-          id="loadChart"
-          width="1000"
-          height="380"
-        ></canvas>
-      </div>
-      <div class="row">
-        <div class="col-lg-3" id="congestion">
-          <h3>Congested Links</h3>
-          <ul id="hotLinks"></ul>
-        </div>
-        <div class="col-lg-9">
-          <h3>Live Topology</h3>
-          <svg
-            id="topologyNetwork"
-            width="850"
-            height="500"
-            style="
-              border: 1px solid #ccc;
-              background: #f8fafc;
-              border-radius: 8px;
-            "
-          ></svg>
-          <div
-            id="legend"
-            style="
-              margin-top: 12px;
-              padding: 10px;
-              background: #f9fafb;
-              border-radius: 6px;
-              border: 1px solid #e5e7eb;
-            "
-          >
-            <strong style="color: #374151">Network Status:</strong>
-            <span
-              style="
-                background: #059669;
-                width: 12px;
-                height: 12px;
-                display: inline-block;
-                margin: 0 4px 0 8px;
-                border-radius: 3px;
-              "
-            ></span>
-            <span style="color: #059669; font-weight: 500">Normal</span>
-            &nbsp;&nbsp;
-            <span
-              style="
-                background: #d97706;
-                width: 12px;
-                height: 12px;
-                display: inline-block;
-                margin: 0 4px 0 8px;
-                border-radius: 3px;
-              "
-            ></span>
-            <span style="color: #d97706; font-weight: 500">Warning</span>
-            &nbsp;&nbsp;
-            <span
-              style="
-                background: #dc2626;
-                width: 12px;
-                height: 12px;
-                display: inline-block;
-                margin: 0 4px 0 8px;
-                border-radius: 3px;
-              "
-            ></span>
-            <span style="color: #dc2626; font-weight: 500">Critical</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Detailed Efficiency Metrics -->
-      <div class="efficiency-container">
-        <h3>Detailed Performance Comparison</h3>
         <div class="row">
-          <div class="col-lg-6">
-            <h4>Path Length Comparison</h4>
-            <div class="metric-card">
-              <div>
-                Load Balancer Avg:
-                <span class="metric-value" id="avgPathLengthLB">-</span> hops
+          <div class="col-lg-3">
+            <div class="chart-container">
+              <div class="chart-header">
+                <h4 class="chart-title">Current Paths</h4>
               </div>
-              <div>
-                Shortest Path Avg:
-                <span class="metric-value" id="avgPathLengthSP">-</span> hops
-              </div>
-              <div>
-                Path Overhead:
-                <span class="metric-value" id="pathOverhead">-</span>
-              </div>
+              <ul id="path" class="info-list"></ul>
             </div>
           </div>
-          <div class="col-lg-6">
-            <h4>System Information</h4>
-            <div class="metric-card">
-              <div>
-                Runtime: <span class="metric-value" id="runtime">-</span>
-              </div>
-              <div>
-                Total Flows Processed:
-                <span class="metric-value" id="loadBalancedFlows">-</span>
-              </div>
+          <div class="col-lg-9">
+            <div class="chart-container">
+              <canvas
+                id="loadChart"
+                class="chart-canvas"
+                width="700"
+                height="500"
+              ></canvas>
             </div>
-
-            <h4>Algorithm Information</h4>
-            <div class="metric-card">
-              <div>
-                Mode: <span class="metric-value" id="algorithmMode">-</span>
+          </div>
+        </div>
+      </section>
+      <!-- Network Topology & Status -->
+      <section class="dashboard-section">
+        <div class="section-header">
+          <h3>Network Topology & Status</h3>
+        </div>
+        <div class="row">
+          <div class="col-lg-3">
+            <div class="chart-container">
+              <div class="chart-header">
+                <h4 class="chart-title">Congested Links</h4>
               </div>
-              <div>
-                Alternative Paths:
-                <span class="metric-value" id="alternativePaths">-</span>
-              </div>
-              <div>
-                Congestion Trends:
-                <span class="metric-value" id="congestionTrends">-</span>
+              <ul id="hotLinks" class="info-list"></ul>
+            </div>
+          </div>
+          <div class="col-lg-9">
+            <div class="topology-container">
+              <svg id="topologyNetwork" width="850" height="500"></svg>
+              <div class="topology-legend">
+                <strong>Network Status:</strong>
+                <div class="legend-item">
+                  <div class="legend-color" style="background: #059669"></div>
+                  <span>Normal</span>
+                </div>
+                <div class="legend-item">
+                  <div class="legend-color" style="background: #d97706"></div>
+                  <span>Warning</span>
+                </div>
+                <div class="legend-item">
+                  <div class="legend-color" style="background: #dc2626"></div>
+                  <span>Critical</span>
+                </div>
               </div>
             </div>
           </div>
         </div>
-      </div>
-      <footer>
-        <p>SDN Load Balancer &copy; 2025</p>
+      </section>
+
+      <!-- Detailed Performance Comparison -->
+      <section class="dashboard-section compact-section">
+        <div class="section-header">
+          <h3>Detailed Performance Comparison</h3>
+        </div>
+        <div class="compact-metrics-container">
+          <div class="compact-metric-group">
+            <h4 class="compact-group-title">Path Analysis</h4>
+            <div class="compact-metric-row">
+              <span class="compact-metric-label">LB Avg:</span>
+              <span class="compact-metric-value" id="avgPathLengthLB">-</span>
+              <span class="compact-metric-unit">hops</span>
+            </div>
+            <div class="compact-metric-row">
+              <span class="compact-metric-label">SP Avg:</span>
+              <span class="compact-metric-value" id="avgPathLengthSP">-</span>
+              <span class="compact-metric-unit">hops</span>
+            </div>
+            <div class="compact-metric-row">
+              <span class="compact-metric-label">Overhead:</span>
+              <span class="compact-metric-value" id="pathOverhead">-</span>
+              <span class="compact-metric-unit"></span>
+            </div>
+          </div>
+
+          <div class="compact-metric-group">
+            <h4 class="compact-group-title">System Status</h4>
+            <div class="compact-metric-row">
+              <span class="compact-metric-label">Runtime:</span>
+              <span class="compact-metric-value" id="runtime">-</span>
+              <span class="compact-metric-unit"></span>
+            </div>
+            <div class="compact-metric-row">
+              <span class="compact-metric-label">Total Flows:</span>
+              <span class="compact-metric-value" id="loadBalancedFlows">-</span>
+              <span class="compact-metric-unit"></span>
+            </div>
+            <div class="compact-metric-row">
+              <span class="compact-metric-label">Mode:</span>
+              <span class="compact-metric-value" id="algorithmMode">-</span>
+              <span class="compact-metric-unit"></span>
+            </div>
+          </div>
+
+          <div class="compact-metric-group">
+            <h4 class="compact-group-title">Algorithm Info</h4>
+            <div class="compact-metric-row">
+              <span class="compact-metric-label">Alt Paths:</span>
+              <span class="compact-metric-value" id="alternativePaths">-</span>
+              <span class="compact-metric-unit"></span>
+            </div>
+            <div class="compact-metric-row">
+              <span class="compact-metric-label">Congestion:</span>
+              <span class="compact-metric-value" id="congestionTrends">-</span>
+              <span class="compact-metric-unit"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+      <footer class="dashboard-footer">
+        <p><strong>SDN Load Balancer Dashboard</strong> &copy; 2025</p>
         <p>Created by Amirreza Alibeigi - Reza Ghadiri Abkenari</p>
       </footer>
     </div>

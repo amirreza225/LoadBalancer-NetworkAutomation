@@ -28,21 +28,73 @@ function initChart() {
     data: { datasets: [] },
     options: {
       responsive: true,
+      maintainAspectRatio: false,
       animation: false,
       scales: {
         x: {
           type: "time",
           time: { unit: "second", tooltipFormat: "HH:mm:ss" },
-          title: { display: true, text: "Time" }
+          title: { 
+            display: true, 
+            text: "Time",
+            font: {
+              size: 14,
+              weight: '500'
+            },
+            color: '#374151'
+          },
+          grid: {
+            color: '#f3f4f6',
+            borderColor: '#e5e7eb'
+          },
+          ticks: {
+            color: '#6b7280'
+          }
         },
         y: {
           beginAtZero: true,
-          title: { display: true, text: "Bytes/sec" }
+          title: { 
+            display: true, 
+            text: "Bandwidth (Bytes/sec)",
+            font: {
+              size: 14,
+              weight: '500'
+            },
+            color: '#374151'
+          },
+          grid: {
+            color: '#f3f4f6',
+            borderColor: '#e5e7eb'
+          },
+          ticks: {
+            color: '#6b7280'
+          }
         }
       },
       plugins: {
-        legend: { position: "top", align: "end" },
-        title: { display: true, text: "Live Link Load (Moving Avg)" }
+        legend: { 
+          position: "top", 
+          align: "end",
+          labels: {
+            font: {
+              size: 12,
+              weight: '500'
+            },
+            color: '#374151',
+            padding: 20
+          }
+        },
+        title: { 
+          display: false
+        },
+        tooltip: {
+          backgroundColor: '#1f2937',
+          titleColor: '#f9fafb',
+          bodyColor: '#f9fafb',
+          borderColor: '#374151',
+          borderWidth: 1,
+          cornerRadius: 8
+        }
       }
     }
   });
@@ -109,14 +161,54 @@ async function updatePathsDisplay() {
     }
     
     // pathsObj is now an object: { "h1→h2": [1,2,3], ... }
-    const lines = Object.entries(pathsObj).map(([flow, path]) => {
+    const uniquePaths = new Set();
+    const lines = [];
+    
+    Object.entries(pathsObj).forEach(([flow, path]) => {
       if (!path || !Array.isArray(path) || path.length === 0) {
-        return `${flow} : No path found`;
+        lines.push(`${flow} : No path found`);
+        return;
       }
       
-      // Format path with switch names
-      const formattedPath = path.map(dpid => `s${dpid}`).join(" → ");
-      return `${flow} : ${formattedPath}`;
+      // Create a normalized flow key to avoid duplicates (h1→h2 and h2→h1)
+      const flowParts = flow.split("→");
+      if (flowParts.length === 2) {
+        const [src, dst] = flowParts;
+        const normalizedFlow = src.localeCompare(dst) <= 0 ? `${src}→${dst}` : `${dst}→${src}`;
+        
+        // Check if we've already seen this flow (in either direction)
+        if (!uniquePaths.has(normalizedFlow)) {
+          uniquePaths.add(normalizedFlow);
+          
+          // Format path with switch names
+          const formattedPath = path.map(dpid => `s${dpid}`).join(" → ");
+          lines.push(`${flow} : ${formattedPath}`);
+        }
+      } else {
+        // Fallback for unexpected format
+        const formattedPath = path.map(dpid => `s${dpid}`).join(" → ");
+        lines.push(`${flow} : ${formattedPath}`);
+      }
+    });
+    
+    // Sort lines by host numbers (extract numbers from host names)
+    lines.sort((a, b) => {
+      const extractHostNumbers = (line) => {
+        const match = line.match(/h(\d+)→h(\d+)/);
+        if (match) {
+          return [parseInt(match[1]), parseInt(match[2])];
+        }
+        return [0, 0];
+      };
+      
+      const [srcA, dstA] = extractHostNumbers(a);
+      const [srcB, dstB] = extractHostNumbers(b);
+      
+      // Sort by source host first, then by destination host
+      if (srcA !== srcB) {
+        return srcA - srcB;
+      }
+      return dstA - dstB;
     });
     
     pathContainer.innerHTML = lines.map(line => `<li>${line}</li>`).join("");
@@ -132,62 +224,30 @@ async function fetchJSON(endpoint, opts) {
   return res.json();
 }
 
-// Show notification to user
+// Show notification to user with professional styling
 function showNotification(message, type = "info") {
   // Create notification element
   const notification = document.createElement("div");
   notification.className = `notification ${type}`;
   notification.textContent = message;
   
-  // Style the notification
-  notification.style.cssText = `
-    position: fixed;
-    top: 20px;
-    right: 20px;
-    padding: 10px 20px;
-    border-radius: 4px;
-    color: white;
-    font-weight: bold;
-    z-index: 1000;
-    opacity: 0;
-    transition: opacity 0.3s ease;
-    max-width: 400px;
-    word-wrap: break-word;
-  `;
-  
-  // Set background color based on type
-  switch (type) {
-    case "success":
-      notification.style.backgroundColor = "#28a745";
-      break;
-    case "error":
-      notification.style.backgroundColor = "#dc3545";
-      break;
-    case "warning":
-      notification.style.backgroundColor = "#ffc107";
-      notification.style.color = "#000";
-      break;
-    default: // info
-      notification.style.backgroundColor = "#17a2b8";
-  }
-  
   // Add to page
   document.body.appendChild(notification);
   
-  // Fade in
+  // Trigger show animation
   setTimeout(() => {
-    notification.style.opacity = "1";
+    notification.classList.add("show");
   }, 10);
   
-  // Remove after 3 seconds
+  // Remove after 4 seconds with fade out
   setTimeout(() => {
-    notification.style.opacity = "0";
+    notification.classList.remove("show");
     setTimeout(() => {
       if (notification.parentNode) {
         notification.parentNode.removeChild(notification);
       }
     }, 300);
-  }, 3000);
+  }, 4000);
 }
 
 // Wire up UI controls
@@ -259,10 +319,35 @@ function attachUI() {
   };
 }
 
+// Apply professional animations to dashboard sections
+function initProfessionalAnimations() {
+  // Add fade-in animations to dashboard sections
+  const sections = document.querySelectorAll('.dashboard-section');
+  sections.forEach((section, index) => {
+    section.style.opacity = '0';
+    section.style.transform = 'translateY(20px)';
+    
+    setTimeout(() => {
+      section.style.transition = 'all 0.6s ease-out';
+      section.style.opacity = '1';
+      section.style.transform = 'translateY(0)';
+    }, index * 200 + 300); // Stagger the animations
+  });
+  
+  // Add slide-in animation to controls panel
+  const controlsPanel = document.querySelector('.controls-panel');
+  if (controlsPanel) {
+    controlsPanel.classList.add('slide-in-right');
+  }
+}
+
 // Bootstrap everything
 window.onload = () => {
   attachUI();
   initChart();
   updateChart();
   setInterval(updateChart, POLL_INTERVAL);
+  
+  // Add professional animations
+  setTimeout(initProfessionalAnimations, 100);
 };
