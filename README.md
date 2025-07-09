@@ -153,11 +153,11 @@ cd LoadBalancer-NetworkAutomation
 ./docker-run.sh shell
 
 # Inside container - start components in CORRECT ORDER:
-# 1. Start topology FIRST (in first terminal)
+# 1. Start controller FIRST (in first terminal)
 ryu-manager --observe-links --ofp-tcp-listen-port 6653 --wsapi-port 8080 --wsapi-host 0.0.0.0 lb_modular.py
 
 
-# 2. Start enhanced controller (in new terminal)
+# 2. Start topology (in new terminal)
 ./docker-run.sh shell
 sudo python3 hexring_topo.py
 
