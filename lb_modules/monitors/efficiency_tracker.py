@@ -421,46 +421,60 @@ class EfficiencyTracker:
                               load_balancing_rate, congestion_avoidance_rate, variance_improvement, path_overhead)
     
     def _calculate_variance_improvement(self, now):
-        """Calculate variance improvement compared to baseline."""
-        if not hasattr(self.parent_app, 'links'):
+        """Calculate variance improvement compared to proper baseline simulation."""
+        if not hasattr(self.parent_app, 'links') or not self.parent_app.links:
             return 0
         
-        # Get current link utilizations
-        current_utilizations = []
-        baseline_utilizations = []
-        
-        for (dpid1, dpid2), (port1, port2) in self.parent_app.links.items():
-            if dpid1 < dpid2:  # Avoid duplicates
-                # Get current utilization
-                if hasattr(self.parent_app, 'traffic_monitor'):
-                    current_util = self.parent_app.traffic_monitor.get_link_utilization(dpid1, dpid2, now)
-                else:
-                    current_util = self._get_link_utilization(dpid1, dpid2, now)
+        try:
+            # Get current link utilizations
+            current_utilizations = self._get_current_link_utilizations(now)
+            if not current_utilizations:
+                self.logger.debug("No current utilizations available for variance calculation")
+                return 0
+            
+            # Simulate baseline (shortest-path) traffic distribution
+            baseline_utilizations = self._simulate_shortest_path_baseline(now)
+            if not baseline_utilizations:
+                self.logger.debug("Cannot simulate baseline traffic distribution")
+                return 0
+            
+            # Ensure both lists have the same links
+            common_links = set(current_utilizations.keys()) & set(baseline_utilizations.keys())
+            if not common_links:
+                self.logger.debug("No common links between current and baseline calculations")
+                return 0
+            
+            current_values = [current_utilizations[link] for link in common_links]
+            baseline_values = [baseline_utilizations[link] for link in common_links]
+            
+            # Calculate variance
+            current_variance = self._calculate_variance(current_values)
+            baseline_variance = self._calculate_variance(baseline_values)
+            
+            # Store for reference
+            self.efficiency_metrics['link_utilization_variance'] = current_variance
+            self.efficiency_metrics['baseline_link_utilization_variance'] = baseline_variance
+            
+            # Calculate improvement percentage
+            if baseline_variance > 0:
+                improvement = ((baseline_variance - current_variance) / baseline_variance) * 100
+                # Allow negative improvement to show when load balancing makes things worse
+                improvement = max(-100, min(100, improvement))
                 
-                current_utilizations.append(current_util)
+                # Validate the calculation
+                self._validate_variance_calculation(current_utilizations, baseline_utilizations, 
+                                                   current_variance, baseline_variance, improvement)
                 
-                # For baseline, assume all traffic goes through shortest paths
-                # This is a simplified calculation
-                baseline_util = current_util * 0.8  # Assume 20% less distribution
-                baseline_utilizations.append(baseline_util)
-        
-        if not current_utilizations:
+                self.logger.debug("Variance improvement: current=%.2f, baseline=%.2f, improvement=%.1f%%",
+                                 current_variance, baseline_variance, improvement)
+                return improvement
+            else:
+                self.logger.debug("Cannot calculate variance improvement: baseline variance is zero")
+                return 0
+            
+        except Exception as e:
+            self.logger.error("Error calculating variance improvement: %s", e)
             return 0
-        
-        # Calculate variance
-        current_variance = self._calculate_variance(current_utilizations)
-        baseline_variance = self._calculate_variance(baseline_utilizations)
-        
-        # Store for reference
-        self.efficiency_metrics['link_utilization_variance'] = current_variance
-        self.efficiency_metrics['baseline_link_utilization_variance'] = baseline_variance
-        
-        # Calculate improvement percentage
-        if baseline_variance > 0:
-            improvement = ((baseline_variance - current_variance) / baseline_variance) * 100
-            return max(0, improvement)  # Don't show negative improvement
-        
-        return 0
     
     def _update_load_distribution_data(self, now):
         """Update the load distribution calculator with current link utilizations."""
@@ -504,6 +518,306 @@ class EfficiencyTracker:
         mean = sum(values) / len(values)
         variance = sum((x - mean) ** 2 for x in values) / len(values)
         return variance
+    
+    def _get_current_link_utilizations(self, now):
+        """Get current utilizations for all links in the network."""
+        utilizations = {}
+        
+        if not hasattr(self.parent_app, 'links'):
+            return utilizations
+        
+        for (dpid1, dpid2), (port1, port2) in self.parent_app.links.items():
+            if dpid1 < dpid2:  # Avoid duplicates
+                link_key = (dpid1, dpid2)
+                
+                # Get current utilization
+                if hasattr(self.parent_app, 'traffic_monitor'):
+                    util = self.parent_app.traffic_monitor.get_link_utilization(dpid1, dpid2, now)
+                else:
+                    util = self._get_link_utilization(dpid1, dpid2, now)
+                
+                utilizations[link_key] = util
+        
+        return utilizations
+    
+    def _simulate_shortest_path_baseline(self, now):
+        """Simulate traffic distribution under shortest-path routing."""
+        link_traffic = collections.defaultdict(float)
+        
+        # Get active flows and their estimated traffic rates
+        active_flows = self._get_active_flows_with_traffic(now)
+        if not active_flows:
+            self.logger.debug("No active flows found for baseline simulation")
+            return {}
+        
+        total_simulated_flows = 0
+        
+        # For each active flow, route via shortest path and accumulate traffic
+        for (src_dpid, dst_dpid), traffic_rate in active_flows.items():
+            # Calculate shortest path for this flow
+            shortest_path = self._shortest_path_baseline(src_dpid, dst_dpid)
+            if not shortest_path or len(shortest_path) < 2:
+                continue
+            
+            # Add traffic to each link in shortest path
+            for i in range(len(shortest_path) - 1):
+                u, v = shortest_path[i], shortest_path[i + 1]
+                link_key = (min(u, v), max(u, v))
+                link_traffic[link_key] += traffic_rate
+            
+            total_simulated_flows += 1
+        
+        self.logger.debug("Simulated baseline for %d flows across %d links", 
+                         total_simulated_flows, len(link_traffic))
+        
+        return dict(link_traffic)
+    
+    def _get_active_flows_with_traffic(self, now):
+        """Get active flows with estimated traffic rates."""
+        flows_with_traffic = {}
+        
+        # Method 1: Try to get from flow_paths if available
+        if hasattr(self.parent_app, 'flow_paths') and self.parent_app.flow_paths:
+            # Estimate traffic from current link utilizations
+            current_utilizations = self._get_current_link_utilizations(now)
+            total_traffic = sum(current_utilizations.values())
+            
+            if total_traffic > 0:
+                # Distribute total traffic equally among active flows (simplified)
+                num_flows = len(self.parent_app.flow_paths)
+                avg_flow_rate = total_traffic / num_flows if num_flows > 0 else 0
+                
+                for flow_key, path in self.parent_app.flow_paths.items():
+                    if isinstance(flow_key, tuple) and len(flow_key) >= 2:
+                        # Try to extract DPID from flow key
+                        src_dpid, dst_dpid = self._extract_dpids_from_flow_key(flow_key)
+                        if src_dpid and dst_dpid:
+                            flows_with_traffic[(src_dpid, dst_dpid)] = avg_flow_rate
+        
+        # Method 2: Fallback - create flows from MAC-to-DPID mappings
+        if not flows_with_traffic and hasattr(self.parent_app, 'mac_to_dpid'):
+            current_utilizations = self._get_current_link_utilizations(now)
+            total_traffic = sum(current_utilizations.values())
+            
+            if total_traffic > 0:
+                # Create representative flows between all switch pairs
+                switches = list(self.parent_app.mac_to_dpid.values())
+                switch_pairs = []
+                for i, src in enumerate(switches):
+                    for dst in switches[i+1:]:
+                        switch_pairs.append((src, dst))
+                
+                if switch_pairs:
+                    avg_flow_rate = total_traffic / len(switch_pairs)
+                    for src_dpid, dst_dpid in switch_pairs:
+                        flows_with_traffic[(src_dpid, dst_dpid)] = avg_flow_rate
+        
+        # Method 3: Ultimate fallback - use current efficiency metrics
+        if not flows_with_traffic and self.efficiency_metrics.get('total_flows', 0) > 0:
+            current_utilizations = self._get_current_link_utilizations(now)
+            total_traffic = sum(current_utilizations.values())
+            
+            if total_traffic > 0 and hasattr(self.parent_app, 'dp_set'):
+                switches = list(self.parent_app.dp_set.keys())
+                if len(switches) >= 2:
+                    # Create flows between adjacent switches
+                    avg_flow_rate = total_traffic / self.efficiency_metrics['total_flows']
+                    for i in range(len(switches) - 1):
+                        flows_with_traffic[(switches[i], switches[i+1])] = avg_flow_rate
+        
+        self.logger.debug("Generated %d active flows for baseline simulation (total traffic: %.1f Mbps)",
+                         len(flows_with_traffic), sum(flows_with_traffic.values()) / 1_000_000)
+        
+        return flows_with_traffic
+    
+    def _extract_dpids_from_flow_key(self, flow_key):
+        """Extract source and destination DPIDs from flow key."""
+        try:
+            if isinstance(flow_key, tuple) and len(flow_key) >= 2:
+                src_id, dst_id = flow_key[0], flow_key[1]
+                
+                # If already DPIDs (integers)
+                if isinstance(src_id, int) and isinstance(dst_id, int):
+                    return src_id, dst_id
+                
+                # If MAC addresses, convert to DPIDs
+                if isinstance(src_id, str) and isinstance(dst_id, str):
+                    src_dpid = self.parent_app.mac_to_dpid.get(src_id)
+                    dst_dpid = self.parent_app.mac_to_dpid.get(dst_id)
+                    return src_dpid, dst_dpid
+                    
+        except Exception as e:
+            self.logger.debug("Could not extract DPIDs from flow key %s: %s", flow_key, e)
+        
+        return None, None
+    
+    def _validate_variance_calculation(self, current_utilizations, baseline_utilizations, current_variance, baseline_variance, improvement):
+        """Validate variance improvement calculation and log detailed information."""
+        validation_passed = True
+        issues = []
+        
+        # Check for reasonable variance values
+        if current_variance < 0 or baseline_variance < 0:
+            issues.append(f"Negative variance detected: current={current_variance}, baseline={baseline_variance}")
+            validation_passed = False
+        
+        # Check for unrealistic improvement values
+        if improvement < -100 or improvement > 100:
+            issues.append(f"Improvement outside valid range: {improvement}%")
+            validation_passed = False
+        
+        # Check for zero utilizations (might indicate no traffic)
+        if all(u == 0 for u in current_utilizations.values()):
+            issues.append("All current utilizations are zero (no traffic detected)")
+        
+        if all(u == 0 for u in baseline_utilizations.values()):
+            issues.append("All baseline utilizations are zero (simulation failed)")
+        
+        # Log detailed information for debugging
+        current_values = list(current_utilizations.values())
+        baseline_values = list(baseline_utilizations.values())
+        
+        self.logger.debug("Variance validation - Links: %d, Current: avg=%.1f std=%.1f var=%.2f, "
+                         "Baseline: avg=%.1f std=%.1f var=%.2f, Improvement: %.1f%%",
+                         len(current_values),
+                         sum(current_values) / len(current_values) if current_values else 0,
+                         self._calculate_std_dev(current_values),
+                         current_variance,
+                         sum(baseline_values) / len(baseline_values) if baseline_values else 0,
+                         self._calculate_std_dev(baseline_values),
+                         baseline_variance,
+                         improvement)
+        
+        # Log top utilized links for debugging
+        if current_utilizations:
+            sorted_links = sorted(current_utilizations.items(), key=lambda x: x[1], reverse=True)
+            top_links = sorted_links[:3]  # Top 3 most utilized
+            self.logger.debug("Top utilized links: %s", 
+                             [(f"{link[0]}-{link[1]}", f"{util/1_000_000:.1f}M") for link, util in top_links])
+        
+        # Log validation results
+        if validation_passed:
+            self.logger.debug("Variance calculation validation: PASSED")
+        else:
+            self.logger.warning("Variance calculation validation: FAILED - %s", ", ".join(issues))
+        
+        return validation_passed
+    
+    def _calculate_std_dev(self, values):
+        """Calculate standard deviation of values."""
+        if not values or len(values) < 2:
+            return 0.0
+        
+        mean = sum(values) / len(values)
+        variance = sum((x - mean) ** 2 for x in values) / len(values)
+        return variance ** 0.5
+    
+    def test_variance_calculation_scenarios(self):
+        """Test variance improvement calculation with various scenarios for validation."""
+        self.logger.info("Testing variance improvement calculation scenarios...")
+        
+        test_scenarios = [
+            {
+                'name': 'Perfect Load Balancing',
+                'current': {(1, 2): 100, (2, 3): 100, (3, 4): 100},
+                'baseline': {(1, 2): 300, (2, 3): 0, (3, 4): 0},
+                'expected_improvement': "> 90%"
+            },
+            {
+                'name': 'No Load Balancing',
+                'current': {(1, 2): 300, (2, 3): 0, (3, 4): 0},
+                'baseline': {(1, 2): 300, (2, 3): 0, (3, 4): 0},
+                'expected_improvement': "~0%"
+            },
+            {
+                'name': 'Worse than Baseline',
+                'current': {(1, 2): 0, (2, 3): 0, (3, 4): 300},
+                'baseline': {(1, 2): 100, (2, 3): 100, (3, 4): 100},
+                'expected_improvement': "< 0%"
+            },
+            {
+                'name': 'Moderate Improvement',
+                'current': {(1, 2): 150, (2, 3): 75, (3, 4): 75},
+                'baseline': {(1, 2): 200, (2, 3): 100, (3, 4): 0},
+                'expected_improvement': "~20-40%"
+            }
+        ]
+        
+        for scenario in test_scenarios:
+            current_values = list(scenario['current'].values())
+            baseline_values = list(scenario['baseline'].values())
+            
+            current_variance = self._calculate_variance(current_values)
+            baseline_variance = self._calculate_variance(baseline_values)
+            
+            if baseline_variance > 0:
+                improvement = ((baseline_variance - current_variance) / baseline_variance) * 100
+            else:
+                improvement = 0
+            
+            self.logger.info("Scenario '%s': Current var=%.2f, Baseline var=%.2f, Improvement=%.1f%% (Expected: %s)",
+                           scenario['name'], current_variance, baseline_variance, improvement, scenario['expected_improvement'])
+        
+        self.logger.info("Variance calculation scenario testing completed")
+    
+    def get_variance_calculation_debug_info(self, now):
+        """Get detailed debug information about variance calculation."""
+        debug_info = {
+            'timestamp': now,
+            'current_utilizations': {},
+            'baseline_simulation': {},
+            'variance_metrics': {},
+            'flow_information': {},
+            'validation_status': 'unknown'
+        }
+        
+        try:
+            # Get current utilizations
+            current_utils = self._get_current_link_utilizations(now)
+            debug_info['current_utilizations'] = {
+                f"{link[0]}-{link[1]}": f"{util/1_000_000:.2f}M" 
+                for link, util in current_utils.items()
+            }
+            
+            # Get baseline simulation
+            baseline_utils = self._simulate_shortest_path_baseline(now)
+            debug_info['baseline_simulation'] = {
+                f"{link[0]}-{link[1]}": f"{util/1_000_000:.2f}M" 
+                for link, util in baseline_utils.items()
+            }
+            
+            # Calculate variance metrics
+            if current_utils and baseline_utils:
+                common_links = set(current_utils.keys()) & set(baseline_utils.keys())
+                if common_links:
+                    current_values = [current_utils[link] for link in common_links]
+                    baseline_values = [baseline_utils[link] for link in common_links]
+                    
+                    debug_info['variance_metrics'] = {
+                        'current_variance': self._calculate_variance(current_values),
+                        'baseline_variance': self._calculate_variance(baseline_values),
+                        'current_std_dev': self._calculate_std_dev(current_values),
+                        'baseline_std_dev': self._calculate_std_dev(baseline_values),
+                        'current_mean': sum(current_values) / len(current_values),
+                        'baseline_mean': sum(baseline_values) / len(baseline_values),
+                        'link_count': len(common_links)
+                    }
+            
+            # Get flow information
+            active_flows = self._get_active_flows_with_traffic(now)
+            debug_info['flow_information'] = {
+                'active_flow_count': len(active_flows),
+                'total_simulated_traffic': f"{sum(active_flows.values())/1_000_000:.2f}M",
+                'flows': {f"{src}-{dst}": f"{rate/1_000_000:.2f}M" for (src, dst), rate in list(active_flows.items())[:5]}
+            }
+            
+            debug_info['validation_status'] = 'success'
+            
+        except Exception as e:
+            debug_info['validation_status'] = f'error: {e}'
+            self.logger.error("Error generating variance debug info: %s", e)
+        
+        return debug_info
     
     def _calculate_path_length_stats(self):
         """Calculate average path lengths for load balanced vs shortest paths."""

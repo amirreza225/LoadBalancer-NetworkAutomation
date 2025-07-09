@@ -452,6 +452,33 @@ class LBRestController(ControllerBase):
         
         return self._cors(json.dumps(stats))
     
+    @route('debug_variance', '/debug/variance', methods=['GET'])
+    def debug_variance(self, req, **_):
+        """Get detailed variance calculation debug information"""
+        if not hasattr(self.lb, 'efficiency_tracker'):
+            return self._cors(json.dumps({'error': 'Efficiency tracker not available'}), 404)
+        
+        try:
+            # Get detailed variance calculation debug info
+            import time
+            now = time.time()
+            debug_info = self.lb.efficiency_tracker.get_variance_calculation_debug_info(now)
+            
+            # Add test scenarios if requested
+            run_tests = req.GET.get('test', '').lower() == 'true'
+            if run_tests:
+                self.lb.efficiency_tracker.test_variance_calculation_scenarios()
+                debug_info['test_scenarios_executed'] = True
+            
+            return self._cors(json.dumps(debug_info))
+            
+        except Exception as e:
+            error_response = {
+                'error': f'Variance debug failed: {str(e)}',
+                'timestamp': time.time()
+            }
+            return self._cors(json.dumps(error_response), 500)
+    
     @route('enhanced_config', '/config/enhanced', methods=['GET'])
     def get_enhanced_config(self, req, **_):
         """Get enhanced congestion avoidance calculation configuration"""
