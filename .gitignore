@@ -4,3 +4,4 @@ CLAUDE.md
 document/paper.tex
 /document
 *.pyc
+/docs

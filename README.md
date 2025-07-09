@@ -51,7 +51,7 @@ This project implements a comprehensive, production-ready SDN load balancer feat
 
 ```
 LoadBalancer-NetworkAutomation/
-├── lb_stp_ma_rest.py           # Enhanced Ryu controller with predictive analytics
+├── lb_modular.py           # Enhanced Ryu controller with predictive analytics
 ├── hexring_topo.py             # Original 6-switch hexagonal topology
 ├── generic_topo.py             # Configurable topology generator
 ├── commands.txt                # Updated commands for all topology types
@@ -154,11 +154,12 @@ cd LoadBalancer-NetworkAutomation
 
 # Inside container - start components in CORRECT ORDER:
 # 1. Start topology FIRST (in first terminal)
-sudo python3 hexring_topo.py
+ryu-manager --observe-links --ofp-tcp-listen-port 6653 --wsapi-port 8080 --wsapi-host 0.0.0.0 lb_modular.py
+
 
 # 2. Start enhanced controller (in new terminal)
 ./docker-run.sh shell
-ryu-manager --observe-links --ofp-tcp-listen-port 6653 --wsapi-port 8080 --wsapi-host 0.0.0.0 lb_modular.py
+sudo python3 hexring_topo.py
 
 # 3. Launch web dashboard (in new terminal)
 ./docker-run.sh shell
@@ -180,7 +181,7 @@ If you start controller first, use the **"Cleanup Hosts"** button in the web int
 sudo python3 hexring_topo.py
 
 # Terminal 2: Start enhanced controller
-ryu-manager --observe-links lb_stp_ma_rest.py
+ryu-manager --observe-links --ofp-tcp-listen-port 6653 --wsapi-port 8080 --wsapi-host 0.0.0.0 lb_modular.py
 
 # Terminal 3: Launch web dashboard
 cd web/

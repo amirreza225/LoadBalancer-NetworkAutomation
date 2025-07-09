@@ -19,9 +19,12 @@ sudo netstat -tulpn | grep -E ':(8000|8080|6653)'
 # ==================== RUNNING THE SYSTEM ====================
 
 -start controller (Terminal 1)-
-ryu-manager --observe-links lb_stp_ma_rest.py
+ryu-manager --observe-links --ofp-tcp-listen-port 6653 --wsapi-port 8080 --wsapi-host 0.0.0.0 lb_modular.py
 
--start web server (Terminal 2)-
+-start topology(Terminal 2)-
+sudo python3 hexring_topo.py
+
+-start web server (Terminal 3)-
 cd web/
 sudo python3 -m http.server 8000
 
@@ -79,7 +82,7 @@ sudo mn -c
 
 -simple traffic test hexring-
 h2 iperf -s &
-h1 iperf -c 192.168.8.41 -u -b 100M -t 30
+h1 iperf -c 192.168.8.41 -u -b 1000M -t 30
 
 -high load test hexring-
 h2 iperf -s &
@@ -98,8 +101,8 @@ h5 iperf -s -u -p 5001 &
 h6 iperf -s -u -p 5002 &
 h6 iperf -c 192.168.8.44 -u -p 5001 -b 300M -t 180 &
 h1 iperf -c 192.168.8.45 -u -p 5002 -b 300M -t 180 &
-h2 iperf -c 192.168.8.40 -u -b 200M -t 180 &
-h3 iperf -c 192.168.8.45 -u -b 200M -t 180
+h2 iperf -c 192.168.8.40 -u -b 500M -t 180 &
+h3 iperf -c 192.168.8.45 -u -b 500M -t 180
 
 # ===== GENERIC TOPOLOGY TRAFFIC (192.168.1.x) =====
 
