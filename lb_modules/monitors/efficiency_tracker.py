@@ -49,6 +49,17 @@ class EfficiencyTracker:
         # Track flows that encountered congested baseline paths (proper denominator for congestion avoidance %)
         self.flows_with_congested_baseline = set()
         
+        # Algorithm-specific performance tracking
+        self.algorithm_performance_history = {
+            'adaptive': {'total_flows': 0, 'load_balanced': 0, 'congestion_avoided': 0, 'avg_improvement': 0},
+            'least_loaded': {'total_flows': 0, 'load_balanced': 0, 'congestion_avoided': 0, 'avg_improvement': 0},
+            'weighted_ecmp': {'total_flows': 0, 'load_balanced': 0, 'congestion_avoided': 0, 'avg_improvement': 0},
+            'round_robin': {'total_flows': 0, 'load_balanced': 0, 'congestion_avoided': 0, 'avg_improvement': 0},
+            'latency_aware': {'total_flows': 0, 'load_balanced': 0, 'congestion_avoided': 0, 'avg_improvement': 0},
+            'qos_aware': {'total_flows': 0, 'load_balanced': 0, 'congestion_avoided': 0, 'avg_improvement': 0},
+            'flow_aware': {'total_flows': 0, 'load_balanced': 0, 'congestion_avoided': 0, 'avg_improvement': 0}
+        }
+        
         # Time-based tracking for congestion avoidance events and flow activity
         self.congestion_avoidance_events = {}  # flow_key -> timestamp of last avoidance
         self.flow_activity_timestamps = {}     # flow_key -> timestamp of last activity
@@ -69,6 +80,9 @@ class EfficiencyTracker:
         """Update efficiency metrics for a new flow."""
         self.efficiency_metrics['total_flows'] += 1
         
+        # Track algorithm-specific performance
+        current_algorithm = self._get_current_algorithm_name()
+        
         # Use MAC-based flow key for consistency with main controller
         # Fall back to DPID-based key if MAC addresses not provided
         if src_mac and dst_mac:
@@ -84,19 +98,15 @@ class EfficiencyTracker:
         
         # Also track the DPID-based key for internal calculations
         dpid_flow_key = (s_dpid, d_dpid)
-        baseline_path = None
         
-        # If we have alternative paths stored, the first one should be the hop-count baseline
-        if hasattr(self.parent_app, 'alternative_paths') and dpid_flow_key in self.parent_app.alternative_paths:
-            alt_paths = self.parent_app.alternative_paths[dpid_flow_key]
-            if alt_paths:
-                baseline_path = alt_paths[0]  # First path is hop-count baseline
+        # ALGORITHM-SPECIFIC baseline comparison (instead of universal hop-count)
+        baseline_path = self._get_algorithm_specific_baseline(s_dpid, d_dpid, cost, current_algorithm, dpid_flow_key)
         
         if not baseline_path:
             # Fallback to calculating baseline path
             baseline_path = self._shortest_path_baseline(s_dpid, d_dpid)
         
-        self.logger.info("Flow metrics update - Selected path: %s, Baseline (hop-count): %s, Flow key: %s", path, baseline_path, flow_key)
+        self.logger.info("Flow metrics update - Selected path: %s, Baseline (%s-specific): %s, Flow key: %s", path, current_algorithm, baseline_path, flow_key)
         
         if baseline_path:
             # Check if we're using a different path than shortest path
@@ -115,8 +125,8 @@ class EfficiencyTracker:
                 congested_links = []
                 baseline_total_cost = 0
                 
-                # Check current congestion on baseline path (REDUCED FOR D-ITG COMPATIBILITY)
-                congestion_threshold = self.parent_app.THRESHOLD_BPS * 0.1  # 10% threshold (reduced from 30% for D-ITG)
+                # Check current congestion on baseline path (RELAXED FOR BETTER DETECTION)
+                congestion_threshold = self.parent_app.THRESHOLD_BPS * 0.2  # 20% threshold (increased from 10% for better detection)
                 self.logger.debug("Checking baseline congestion with threshold %.1f Mbps", congestion_threshold/1_000_000)
                 
                 for i in range(len(baseline_path) - 1):
@@ -124,9 +134,9 @@ class EfficiencyTracker:
                     link_cost = cost.get((u, v), 0)
                     baseline_total_cost += link_cost
                     
-                    # Only count actual congestion (>10% threshold) for avoidance tracking
+                    # Only count actual congestion (>20% threshold) for avoidance tracking
                     # Predicted congestion tracking removed to prevent false positives
-                    if link_cost > congestion_threshold:  # 10% threshold for actual congestion (reduced for D-ITG)
+                    if link_cost > congestion_threshold:  # 20% threshold for actual congestion (relaxed for better detection)
                         baseline_congested = True
                         congested_links.append(f"{u}-{v} (congested: {link_cost/1_000_000:.1f}M)")
                         self.logger.debug("Link %s-%s is congested: %.1f Mbps > %.1f Mbps threshold", 
@@ -178,21 +188,21 @@ class EfficiencyTracker:
                                 else:
                                     self.logger.debug("Selected path avoids congested link %s-%s", u, v)
                         
-                        # STRICTER cost improvement requirement: 30% better performance
-                        cost_improvement_threshold = baseline_total_cost * 0.7  # Must be 30% better
+                        # RELAXED cost improvement requirement: 15% better performance (was 30%)
+                        cost_improvement_threshold = baseline_total_cost * 0.85  # Must be 15% better
                         has_significant_cost_improvement = selected_path_cost < cost_improvement_threshold
                         
-                        # NEW: Check if selected path itself is not heavily congested (links <50% threshold)
+                        # RELAXED: Check if selected path itself is not heavily congested (links <70% threshold, was 50%)
                         selected_path_acceptable = True
                         selected_path_max_congestion = 0
                         for j in range(len(path) - 1):
                             u, v = path[j], path[j + 1]
                             link_cost = cost.get((u, v), 0)
                             selected_path_max_congestion = max(selected_path_max_congestion, link_cost)
-                            # If selected path has links >50% threshold, it's also congested
-                            if link_cost > self.parent_app.THRESHOLD_BPS * 0.5:  # 50% threshold
+                            # If selected path has links >70% threshold, it's also congested (relaxed from 50%)
+                            if link_cost > self.parent_app.THRESHOLD_BPS * 0.7:  # 70% threshold
                                 selected_path_acceptable = False
-                                self.logger.debug("Selected path link %s-%s is also congested: %.1fM > 50%% threshold", 
+                                self.logger.debug("Selected path link %s-%s is also congested: %.1fM > 70%% threshold", 
                                                 u, v, link_cost/1_000_000)
                         
                         # NEW: Calculate actual congestion reduction percentage
@@ -266,6 +276,89 @@ class EfficiencyTracker:
                         cost_improvement = ((baseline_total_cost - selected_path_cost) / baseline_total_cost) * 100 if baseline_total_cost > 0 else 0
                         self.logger.info("⚠ Congestion detected but NOT avoided - avoided_links=%s, cost_improved=%s (%.1f%% improvement), baseline cost=%.1fM, selected cost=%.1fM", 
                                        avoided_links, cost_improved, cost_improvement, baseline_total_cost/1_000_000, selected_path_cost/1_000_000)
+        
+        # Update algorithm-specific metrics
+        self._update_algorithm_specific_metrics(current_algorithm, path, baseline_path, 
+                                              avoided_congestion if 'avoided_congestion' in locals() else False,
+                                              cost_improvement if 'cost_improvement' in locals() else 0)
+    
+    def _get_current_algorithm_name(self):
+        """Get the name of the currently active load balancing algorithm."""
+        if not hasattr(self.parent_app, 'load_balancing_mode'):
+            return 'unknown'
+        
+        # Import here to avoid circular imports
+        from ..config.constants import LOAD_BALANCING_MODES
+        
+        # Reverse lookup to get algorithm name from mode value
+        mode_to_name = {v: k for k, v in LOAD_BALANCING_MODES.items()}
+        return mode_to_name.get(self.parent_app.load_balancing_mode, 'unknown')
+    
+    def _update_algorithm_specific_metrics(self, algorithm_name, selected_path, baseline_path, avoided_congestion, cost_improvement):
+        """Update algorithm-specific performance metrics."""
+        if algorithm_name not in self.algorithm_performance_history:
+            return
+        
+        algo_stats = self.algorithm_performance_history[algorithm_name]
+        algo_stats['total_flows'] += 1
+        
+        # Track load balancing (using different path than baseline)
+        if selected_path != baseline_path:
+            algo_stats['load_balanced'] += 1
+        
+        # Track congestion avoidance
+        if avoided_congestion:
+            algo_stats['congestion_avoided'] += 1
+        
+        # Track average improvement
+        if cost_improvement > 0:
+            current_avg = algo_stats['avg_improvement']
+            flow_count = algo_stats['total_flows']
+            algo_stats['avg_improvement'] = ((current_avg * (flow_count - 1)) + cost_improvement) / flow_count
+        
+        # Log algorithm-specific performance every 10 flows
+        if algo_stats['total_flows'] % 10 == 0:
+            lb_rate = (algo_stats['load_balanced'] / algo_stats['total_flows']) * 100
+            ca_rate = (algo_stats['congestion_avoided'] / max(algo_stats['total_flows'], 1)) * 100
+            self.logger.info("Algorithm '%s' performance: %d flows, %.1f%% load balanced, %.1f%% congestion avoided, %.1f%% avg improvement", 
+                           algorithm_name, algo_stats['total_flows'], lb_rate, ca_rate, algo_stats['avg_improvement'])
+    
+    def get_algorithm_comparison_stats(self):
+        """Get comparative statistics for all algorithms."""
+        comparison = {}
+        
+        for algo_name, stats in self.algorithm_performance_history.items():
+            if stats['total_flows'] > 0:
+                comparison[algo_name] = {
+                    'total_flows': stats['total_flows'],
+                    'load_balancing_rate': (stats['load_balanced'] / stats['total_flows']) * 100,
+                    'congestion_avoidance_rate': (stats['congestion_avoided'] / stats['total_flows']) * 100,
+                    'avg_improvement_percent': stats['avg_improvement'],
+                    'efficiency_score': self._calculate_algorithm_efficiency_score(stats)
+                }
+            else:
+                comparison[algo_name] = {
+                    'total_flows': 0,
+                    'load_balancing_rate': 0,
+                    'congestion_avoidance_rate': 0,
+                    'avg_improvement_percent': 0,
+                    'efficiency_score': 0
+                }
+        
+        return comparison
+    
+    def _calculate_algorithm_efficiency_score(self, stats):
+        """Calculate efficiency score for a specific algorithm."""
+        if stats['total_flows'] == 0:
+            return 0
+        
+        lb_rate = (stats['load_balanced'] / stats['total_flows']) * 100
+        ca_rate = (stats['congestion_avoided'] / stats['total_flows']) * 100
+        improvement = min(stats['avg_improvement'], 100)  # Cap at 100%
+        
+        # Weighted score: 40% congestion avoidance, 35% load balancing, 25% improvement
+        score = (ca_rate * 0.4) + (lb_rate * 0.35) + (improvement * 0.25)
+        return min(100, max(0, score))
     
     def _shortest_path_baseline(self, s_dpid, d_dpid):
         """Calculate true shortest path baseline using hop count"""
@@ -858,6 +951,85 @@ class EfficiencyTracker:
         
         return 0
     
+    def _get_algorithm_specific_baseline(self, s_dpid, d_dpid, cost, algorithm, dpid_flow_key):
+        """Get algorithm-specific baseline path for efficiency comparison."""
+        try:
+            if algorithm == 'adaptive':
+                # Adaptive: Compare against current utilization-based shortest path
+                return self._get_utilization_shortest_path(s_dpid, d_dpid, cost)
+            
+            elif algorithm == 'least_loaded':
+                # Least Loaded: Compare against highest-cost path
+                return self._get_highest_cost_path(s_dpid, d_dpid, cost)
+            
+            elif algorithm == 'weighted_ecmp':
+                # Weighted ECMP: Compare against single-path routing (first available)
+                return self._get_single_path_baseline(s_dpid, d_dpid, cost)
+            
+            elif algorithm == 'round_robin':
+                # Round Robin: Compare against static first-path assignment
+                return self._get_static_first_path(s_dpid, d_dpid)
+            
+            elif algorithm == 'latency_aware':
+                # Latency Aware: Compare against longest-hop path
+                return self._get_longest_hop_path(s_dpid, d_dpid)
+            
+            elif algorithm == 'qos_aware':
+                # QoS Aware: Compare against non-QoS routing (utilization-based)
+                return self._get_utilization_shortest_path(s_dpid, d_dpid, cost)
+            
+            elif algorithm == 'flow_aware':
+                # Flow Aware: Compare against flow-agnostic routing (hop-count)
+                return self._shortest_path_baseline(s_dpid, d_dpid)
+            
+            else:
+                # Unknown algorithm: fallback to hop-count baseline
+                return self._shortest_path_baseline(s_dpid, d_dpid)
+                
+        except Exception as e:
+            self.logger.error("Error calculating algorithm-specific baseline for %s: %s", algorithm, e)
+            return self._shortest_path_baseline(s_dpid, d_dpid)
+    
+    def _get_utilization_shortest_path(self, s_dpid, d_dpid, cost):
+        """Get shortest path based on current link utilization."""
+        return self.parent_app._dijkstra(s_dpid, d_dpid, cost, avoid_congested=False)
+    
+    def _get_highest_cost_path(self, s_dpid, d_dpid, cost):
+        """Get path with highest total cost (worst case for least loaded)."""
+        # Get alternative paths and return the highest cost one
+        if hasattr(self.parent_app, 'alternative_paths') and (s_dpid, d_dpid) in self.parent_app.alternative_paths:
+            paths = self.parent_app.alternative_paths[(s_dpid, d_dpid)]
+            if paths:
+                # Calculate costs and return highest
+                path_costs = []
+                for path in paths:
+                    total_cost = sum(cost.get((path[i], path[i+1]), 0) for i in range(len(path)-1))
+                    path_costs.append((total_cost, path))
+                if path_costs:
+                    return max(path_costs, key=lambda x: x[0])[1]
+        return self._shortest_path_baseline(s_dpid, d_dpid)
+    
+    def _get_single_path_baseline(self, s_dpid, d_dpid, cost):
+        """Get single available path (no load balancing)."""
+        return self.parent_app._dijkstra(s_dpid, d_dpid, cost, avoid_congested=False)
+    
+    def _get_static_first_path(self, s_dpid, d_dpid):
+        """Get static first path assignment."""
+        if hasattr(self.parent_app, 'alternative_paths') and (s_dpid, d_dpid) in self.parent_app.alternative_paths:
+            paths = self.parent_app.alternative_paths[(s_dpid, d_dpid)]
+            if paths:
+                return paths[0]  # Always return first path
+        return self._shortest_path_baseline(s_dpid, d_dpid)
+    
+    def _get_longest_hop_path(self, s_dpid, d_dpid):
+        """Get path with most hops (worst case for latency aware)."""
+        if hasattr(self.parent_app, 'alternative_paths') and (s_dpid, d_dpid) in self.parent_app.alternative_paths:
+            paths = self.parent_app.alternative_paths[(s_dpid, d_dpid)]
+            if paths:
+                # Return path with most hops
+                return max(paths, key=len)
+        return self._shortest_path_baseline(s_dpid, d_dpid)
+
     def _get_link_utilization(self, dpid1, dpid2, now):
         """Get link utilization (fallback implementation)."""
         if hasattr(self.parent_app, 'traffic_monitor'):
@@ -1138,16 +1310,16 @@ class EfficiencyTracker:
                 congested_links = []
                 baseline_total_cost = 0
                 
-                # Check current congestion on baseline path
-                congestion_threshold = self.parent_app.THRESHOLD_BPS * 0.3  # 30% threshold
+                # Check current congestion on baseline path (RELAXED)
+                congestion_threshold = self.parent_app.THRESHOLD_BPS * 0.2  # 20% threshold (relaxed from 30%)
                 
                 for i in range(len(baseline_path) - 1):
                     u, v = baseline_path[i], baseline_path[i + 1]
                     link_cost = cost.get((u, v), 0)
                     baseline_total_cost += link_cost
                     
-                    # Only count actual congestion (>30% threshold) for avoidance tracking
-                    if link_cost > congestion_threshold:  # 30% threshold for actual congestion
+                    # Only count actual congestion (>20% threshold) for avoidance tracking
+                    if link_cost > congestion_threshold:  # 20% threshold for actual congestion (relaxed)
                         baseline_congested = True
                         congested_links.append(f"{u}-{v} (congested: {link_cost/1_000_000:.1f}M)")
                 
@@ -1182,8 +1354,8 @@ class EfficiencyTracker:
                                     selected_path_avoids_congestion = False
                                     break
                         
-                        # STRICTER cost improvement requirement: 30% better performance (same as main logic)
-                        cost_improvement_threshold = baseline_total_cost * 0.7  # Must be 30% better
+                        # RELAXED cost improvement requirement: 15% better performance (same as main logic)
+                        cost_improvement_threshold = baseline_total_cost * 0.85  # Must be 15% better
                         has_significant_cost_improvement = selected_path_cost < cost_improvement_threshold
                         
                         # Check if selected path itself is not heavily congested (same logic)
@@ -1193,7 +1365,7 @@ class EfficiencyTracker:
                             u, v = path[j], path[j + 1]
                             link_cost = cost.get((u, v), 0)
                             selected_path_max_congestion = max(selected_path_max_congestion, link_cost)
-                            if link_cost > self.parent_app.THRESHOLD_BPS * 0.5:  # 50% threshold
+                            if link_cost > self.parent_app.THRESHOLD_BPS * 0.7:  # 70% threshold (relaxed)
                                 selected_path_acceptable = False
                                 break
                         

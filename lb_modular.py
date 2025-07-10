@@ -251,6 +251,154 @@ class ModularLoadBalancer(app_manager.RyuApp):
     def _is_host_port(self, dpid, port):
         """Check if port is a host port"""
         return self.host_manager.is_host_port(dpid, port)
+    
+    def _get_current_algorithm_name(self):
+        """Get the name of the currently active load balancing algorithm."""
+        if not hasattr(self, 'load_balancing_mode'):
+            return 'unknown'
+        
+        # Import here to avoid circular imports
+        from lb_modules.config.constants import LOAD_BALANCING_MODES
+        
+        # Reverse lookup to get algorithm name from mode value
+        mode_to_name = {v: k for k, v in LOAD_BALANCING_MODES.items()}
+        return mode_to_name.get(self.load_balancing_mode, 'unknown')
+    
+    def _select_flows_for_rebalancing(self, algorithm_name, cost):
+        """Select flows for rebalancing based on algorithm-specific criteria."""
+        all_flows = list(self.flow_paths.items())
+        
+        if algorithm_name == 'adaptive':
+            # Adaptive: Prioritize flows on congested paths
+            congested_flows = []
+            normal_flows = []
+            
+            for fid, path in all_flows:
+                path_congested = any(cost.get((path[i], path[i+1]), 0) > self.THRESHOLD_BPS * 0.3 
+                                   for i in range(len(path)-1))
+                if path_congested:
+                    congested_flows.append((fid, path))
+                else:
+                    normal_flows.append((fid, path))
+            
+            # Return congested flows first, then some normal flows for proactive balancing
+            return congested_flows + normal_flows[:len(congested_flows)]
+        
+        elif algorithm_name == 'least_loaded':
+            # Least Loaded: Focus on highest utilization flows
+            flow_costs = []
+            for fid, path in all_flows:
+                path_cost = sum(cost.get((path[i], path[i+1]), 0) for i in range(len(path)-1))
+                flow_costs.append((path_cost, fid, path))
+            
+            # Sort by cost (highest first) and return top 60%
+            flow_costs.sort(reverse=True)
+            return [(fid, path) for _, fid, path in flow_costs[:int(len(flow_costs) * 0.6)]]
+        
+        elif algorithm_name == 'weighted_ecmp':
+            # Weighted ECMP: Spread evaluation across all flows for load distribution
+            return all_flows[::2]  # Every other flow
+        
+        elif algorithm_name == 'round_robin':
+            # Round Robin: Rotate through flows systematically
+            if not hasattr(self, '_rr_flow_index'):
+                self._rr_flow_index = 0
+            
+            flows_to_check = 3  # Check 3 flows at a time
+            start_idx = self._rr_flow_index % len(all_flows)
+            selected_flows = []
+            
+            for i in range(flows_to_check):
+                idx = (start_idx + i) % len(all_flows)
+                selected_flows.append(all_flows[idx])
+            
+            self._rr_flow_index += flows_to_check
+            return selected_flows
+        
+        elif algorithm_name == 'latency_aware':
+            # Latency Aware: Focus on longer paths (higher latency)
+            path_lengths = [(len(path), fid, path) for fid, path in all_flows]
+            path_lengths.sort(reverse=True)  # Longest paths first
+            return [(fid, path) for _, fid, path in path_lengths[:int(len(path_lengths) * 0.5)]]
+        
+        elif algorithm_name == 'qos_aware':
+            # QoS Aware: Balanced approach with preference for degraded flows
+            moderate_threshold = self.THRESHOLD_BPS * 0.5
+            degraded_flows = []
+            good_flows = []
+            
+            for fid, path in all_flows:
+                max_link_util = max((cost.get((path[i], path[i+1]), 0) for i in range(len(path)-1)), default=0)
+                if max_link_util > moderate_threshold:
+                    degraded_flows.append((fid, path))
+                else:
+                    good_flows.append((fid, path))
+            
+            # Mix degraded and good flows for balanced QoS
+            return degraded_flows + good_flows[:len(degraded_flows)]
+        
+        elif algorithm_name == 'flow_aware':
+            # Flow Aware: Alternate focus between different flow types
+            return all_flows[:int(len(all_flows) * 0.7)]  # Evaluate 70% of flows
+        
+        else:
+            # Default: Check all flows
+            return all_flows
+    
+    def _should_reroute_for_algorithm(self, algorithm_name, old_path, new_path, cost):
+        """Determine if rerouting should occur based on algorithm-specific criteria."""
+        old_cost = sum(cost.get((old_path[i], old_path[i+1]), 0) for i in range(len(old_path)-1))
+        new_cost = sum(cost.get((new_path[i], new_path[i+1]), 0) for i in range(len(new_path)-1))
+        
+        if algorithm_name == 'adaptive':
+            # Adaptive: Aggressive rerouting on any congestion or 10% improvement
+            old_path_congested = any(cost.get((old_path[i], old_path[i+1]), 0) > self.THRESHOLD_BPS * 0.2 
+                                   for i in range(len(old_path)-1))
+            improvement_threshold = 0.1  # 10% improvement
+            return old_path_congested or (old_cost > 0 and (old_cost - new_cost) / old_cost > improvement_threshold)
+        
+        elif algorithm_name == 'least_loaded':
+            # Least Loaded: Focus on significant load reduction (15% improvement)
+            improvement_threshold = 0.15
+            return old_cost > 0 and (old_cost - new_cost) / old_cost > improvement_threshold
+        
+        elif algorithm_name == 'weighted_ecmp':
+            # Weighted ECMP: Moderate rerouting for load distribution (20% improvement)
+            improvement_threshold = 0.2
+            return old_cost > 0 and (old_cost - new_cost) / old_cost > improvement_threshold
+        
+        elif algorithm_name == 'round_robin':
+            # Round Robin: Conservative rerouting (25% improvement or clear congestion)
+            old_path_congested = any(cost.get((old_path[i], old_path[i+1]), 0) > self.THRESHOLD_BPS * 0.5 
+                                   for i in range(len(old_path)-1))
+            improvement_threshold = 0.25
+            return old_path_congested or (old_cost > 0 and (old_cost - new_cost) / old_cost > improvement_threshold)
+        
+        elif algorithm_name == 'latency_aware':
+            # Latency Aware: Prefer shorter paths and moderate improvement (18% improvement)
+            shorter_path = len(new_path) < len(old_path)
+            improvement_threshold = 0.18
+            significant_improvement = old_cost > 0 and (old_cost - new_cost) / old_cost > improvement_threshold
+            return shorter_path or significant_improvement
+        
+        elif algorithm_name == 'qos_aware':
+            # QoS Aware: Balanced rerouting with service level consideration (20% improvement)
+            moderate_congestion = any(cost.get((old_path[i], old_path[i+1]), 0) > self.THRESHOLD_BPS * 0.3 
+                                    for i in range(len(old_path)-1))
+            improvement_threshold = 0.2
+            return moderate_congestion or (old_cost > 0 and (old_cost - new_cost) / old_cost > improvement_threshold)
+        
+        elif algorithm_name == 'flow_aware':
+            # Flow Aware: Adaptive based on flow characteristics (15% improvement)
+            improvement_threshold = 0.15
+            return old_cost > 0 and (old_cost - new_cost) / old_cost > improvement_threshold
+        
+        else:
+            # Default: Standard rerouting (20% improvement)
+            old_path_congested = any(cost.get((old_path[i], old_path[i+1]), 0) > self.THRESHOLD_BPS 
+                                   for i in range(len(old_path)-1))
+            improvement_threshold = 0.2
+            return old_path_congested or (old_cost > 0 and (old_cost - new_cost) / old_cost > improvement_threshold)
 
     def _calculate_link_costs(self, now):
         """Calculate link costs based on current utilization"""
@@ -311,9 +459,31 @@ class ModularLoadBalancer(app_manager.RyuApp):
         return self.traffic_monitor.get_average_rate(dpid, port, now)
 
     def _rebalance(self, now):
-        """Rebalance flows based on current conditions"""
+        """Algorithm-aware rebalancing with differentiated timing"""
         if not self.topology_ready:
             return
+        
+        # Algorithm-specific rebalancing intervals
+        algorithm_intervals = {
+            'adaptive': 3,        # Most aggressive - every 3 seconds
+            'least_loaded': 4,    # Aggressive - every 4 seconds
+            'weighted_ecmp': 6,   # Moderate - every 6 seconds  
+            'round_robin': 8,     # Conservative - every 8 seconds
+            'latency_aware': 5,   # Latency-focused - every 5 seconds
+            'qos_aware': 7,       # QoS-focused - every 7 seconds
+            'flow_aware': 5       # Flow-focused - every 5 seconds
+        }
+        
+        current_algorithm = self._get_current_algorithm_name()
+        rebalance_interval = algorithm_intervals.get(current_algorithm, 5)
+        
+        # Check if it's time to rebalance for this algorithm
+        last_rebalance_key = f'_last_rebalance_{current_algorithm}'
+        if hasattr(self, last_rebalance_key):
+            if now - getattr(self, last_rebalance_key) < rebalance_interval:
+                return
+        
+        setattr(self, last_rebalance_key, now)
         
         # Periodic cleanup
         if hasattr(self, '_last_cleanup_time'):
@@ -325,7 +495,10 @@ class ModularLoadBalancer(app_manager.RyuApp):
         
         cost = self._calculate_link_costs(now)
         
-        for fid, old_path in list(self.flow_paths.items()):
+        # Algorithm-specific flow selection strategy
+        flows_to_evaluate = self._select_flows_for_rebalancing(current_algorithm, cost)
+        
+        for fid, old_path in flows_to_evaluate:
             src, dst = fid
             
             # Verify flow is still valid
@@ -337,15 +510,8 @@ class ModularLoadBalancer(app_manager.RyuApp):
             new_path = self._find_path(s_dpid, d_dpid, cost)
             
             if new_path and new_path != old_path:
-                # Check if rerouting is beneficial
-                old_cost = sum(cost.get((old_path[i], old_path[i+1]), 0) for i in range(len(old_path)-1))
-                new_cost = sum(cost.get((new_path[i], new_path[i+1]), 0) for i in range(len(new_path)-1))
-                
-                # Reroute if old path is congested or new path is significantly better
-                old_path_congested = any(cost.get((old_path[i], old_path[i+1]), 0) > self.THRESHOLD_BPS 
-                                       for i in range(len(old_path)-1))
-                
-                should_reroute = old_path_congested or (old_cost > 0 and (old_cost - new_cost) / old_cost > 0.2)
+                # Algorithm-specific rerouting criteria
+                should_reroute = self._should_reroute_for_algorithm(current_algorithm, old_path, new_path, cost)
                 
                 if should_reroute:
                     # Track congestion avoidance
