@@ -25,6 +25,11 @@ RUN apt-get update && apt-get install -y \
     openvswitch-switch \
     openvswitch-common \
     sudo \
+    build-essential \
+    gcc \
+    g++ \
+    make \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies with eventlet version that has ALREADY_HANDLED
@@ -61,6 +66,20 @@ RUN git clone https://github.com/mininet/mininet.git /tmp/mininet && \
     install util/m /usr/local/bin/ && \
     echo "Mininet installation completed" && \
     rm -rf /tmp/mininet
+
+# Install D-ITG (Distributed Internet Traffic Generator)
+RUN cd /tmp && \
+    wget http://traffic.comics.unina.it/software/ITG/codice/D-ITG-2.8.1-r1023-src.zip && \
+    unzip D-ITG-2.8.1-r1023-src.zip && \
+    cd D-ITG-2.8.1-r1023/src && \
+    make && \
+    cp ../bin/ITGSend /usr/local/bin/ && \
+    cp ../bin/ITGRecv /usr/local/bin/ && \
+    cp ../bin/ITGLog /usr/local/bin/ && \
+    cp ../bin/ITGDec /usr/local/bin/ && \
+    chmod +x /usr/local/bin/ITG* && \
+    echo "D-ITG installation completed" && \
+    rm -rf /tmp/D-ITG-2.8.1-r1023*
 
 # Create application directory
 WORKDIR /app

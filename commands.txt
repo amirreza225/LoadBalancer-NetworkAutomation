@@ -4,31 +4,6 @@
 # All 7 algorithms with both iperf and D-ITG testing
 # Optimized for hexring topology (192.168.8.4x addressing)
 # ================================================================
-
-# ==================== SYSTEM SETUP ====================
-
--install D-ITG dependencies-
-sudo apt update
-sudo apt install build-essential gcc g++ make wget unzip
-
--download and install D-ITG-
-cd /tmp
-wget http://traffic.comics.unina.it/software/ITG/codice/D-ITG-2.8.1-r1023-src.zip
-unzip D-ITG-2.8.1-r1023-src.zip
-cd D-ITG-2.8.1-r1023/src
-make
-
--install D-ITG binaries-
-sudo cp ../bin/ITGSend /usr/local/bin/
-sudo cp ../bin/ITGRecv /usr/local/bin/
-sudo cp ../bin/ITGLog /usr/local/bin/
-sudo cp ../bin/ITGDec /usr/local/bin/
-sudo chmod +x /usr/local/bin/ITG*
-
--verify D-ITG installation-
-which ITGSend ITGRecv ITGLog ITGDec
-ITGSend -h
-
 # ==================== RUNNING THE SYSTEM ====================
 
 -start controller (Terminal 1)-
